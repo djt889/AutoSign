@@ -31,7 +31,7 @@ app = FastAPI(title="justsign", version="0.1.0-py")
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 HOST = os.environ.get("JUSTSIGN_HOST", "0.0.0.0")
-PORT = int(os.environ.get("JUSTSIGN_PORT", "7300"))
+PORT = int(os.environ.get("JUSTSIGN_PORT", "37421"))
 
 
 def _mask(token: str | None) -> str | None:

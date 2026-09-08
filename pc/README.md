@@ -8,7 +8,7 @@ AutoSign 魔改版核心:FastAPI + Scrapling,替换原 `src/` Node 引擎。
 ```bash
 pip install -r pc/requirements.txt
 scrapling install          # 浏览器内核(P2 OAuth 阶段才需要)
-python -m pc.main          # http://0.0.0.0:7300 (API 文档 /docs)
+python -m pc.main          # http://0.0.0.0:37421 (API 文档 /docs)
 ```
 
 ## 结构

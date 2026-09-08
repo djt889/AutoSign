@@ -400,7 +400,7 @@ class SiteClient:
 
 ### 4.1 形态
 
-- **服务端**:FastAPI 同时托管 `web/static/` 与 `/api/*`。默认监听 `0.0.0.0:7300`,局域网可达(`http://<服务器IP>:7300`)。
+- **服务端**:FastAPI 同时托管 `web/static/` 与 `/api/*`。默认监听 `0.0.0.0:37421`,局域网可达(`http://<服务器IP>:37421`)。
 - **前端**:直接采用原 `src/index.html` 单一暗色页面(首页总览 / 账号 / 站点 / 日志&设置 / 引擎设置 五个 tab),替换 API 调用基地址为同源 `/api/*`(原生就是同源相对路径,几乎零改动);新增一处「授权回调入口」逻辑。
 - **登录态/鉴权**:默认内网可信无鉴权(与原 Node server 一致);可选开启「简易令牌」——访问 WebUI 需填 `JUSTSIGN_TOKEN`(前端 localStorage 持久化,请求带 `Authorization` 头)。
 
@@ -621,7 +621,7 @@ git clone https://github.com/djt889/justsign.git
 cd justsign
 cp .env.example .env                              # 配置端口/令牌/浏览器路径
 python -m pc.main                                  # 或 uvicorn pc.main:app
-# 打开 http://<服务器IP>:7300
+# 打开 http://<服务器IP>:37421
 ```
 
 systemd 示例(常驻):
