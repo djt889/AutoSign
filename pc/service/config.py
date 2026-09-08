@@ -26,6 +26,65 @@ DEFAULTS: dict[str, Any] = {
     "sites": [],
 }
 
+# 内置四站(原 Catalog.java 同源;2026-09-08 实测 /api/status 全部 200)。
+# 仅 setup 初始化时装入,load() 不强制注入——用户删除后不被复活。
+BUILTIN_SITES: list[dict[str, Any]] = [
+    {
+        "key": "agentrouter-org", "name": "AgentRouter",
+        "baseUrl": "https://agentrouter.org", "checkinType": "login",
+        "affUrl": "https://agentrouter.org/register?aff=nc7C",
+        "note": "注册 $175 + 每日登录 $25;login 型(checkin_enabled 缺失,无签到接口)",
+        "accounts": [],
+    },
+    {
+        "key": "api-justwoker-icu", "name": "JustDoWork",
+        "baseUrl": "https://api.justwoker.icu", "checkinType": "newapi",
+        "affUrl": "https://api.justwoker.icu/sign-up?aff=wFQu",
+        "note": "注册 $90 + 每日签到 $20;newapi 型,Turnstile 开启",
+        "accounts": [],
+    },
+    {
+        "key": "gorouter-app", "name": "GoRouter",
+        "baseUrl": "https://gorouter.app", "checkinType": "login",
+        "affUrl": "https://gorouter.app/sign-up?aff=Dr35",
+        "note": "注册 $70 + 每日登录 $10;Turnstile 开启",
+        "accounts": [],
+    },
+    {
+        "key": "kktoken-cc", "name": "KKtoken AI",
+        "baseUrl": "https://kktoken.cc", "checkinType": "newapi",
+        "affUrl": "https://kktoken.cc/sign-up?aff=BpDr",
+        "note": "注册 $75 + 每日签到 $25;newapi 型,Turnstile 开启",
+        "accounts": [],
+    },
+]
+
+
+def setup_builtin() -> dict[str, Any]:
+    """初始化:装入内置四站。
+
+    已存在的 key 跳过;用户主动删除过的记入 cfg['removedBuiltin'] 块名单,
+    再次 setup 不复活(与原版「内置站与自定义站完全平权」语义一致)。
+    """
+    cfg = load()
+    cfg.setdefault("removedBuiltin", [])
+    keys = {s.get("key") for s in cfg.get("sites", [])}
+    removed = set(cfg["removedBuiltin"])
+    for b in BUILTIN_SITES:
+        if b["key"] in keys or b["key"] in removed:
+            continue
+        cfg["sites"].append(dict(b))
+    save(cfg)
+    return cfg
+
+
+def mark_builtin_removed(cfg: dict[str, Any], site_key: str) -> None:
+    """删除站点时调用:内置站记入块名单,防止下次 setup 复活。"""
+    if any(b["key"] == site_key for b in BUILTIN_SITES):
+        removed = cfg.setdefault("removedBuiltin", [])
+        if site_key not in removed:
+            removed.append(site_key)
+
 _lock = RLock()
 
 

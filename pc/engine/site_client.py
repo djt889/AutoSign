@@ -88,7 +88,11 @@ class SiteClient:
     # ---------- 单次请求(FetcherSession 语义,可注入 mock) ----------
 
     def _raw_call(self, method: str, path: str, body: Any = None) -> CallResult:
-        """同步 HTTP:生产走 scrapling FetcherSession;测试注入 transport。"""
+        """同步 HTTP:scrapling FetcherSession(curl_cffi,TLS 指纹伪装)。
+
+        实测(scrapling 0.4.11):retries=0 会触发 'No active session available',
+        故传 retries=1(只发一次);重试语义由本类 429 逻辑管理。
+        """
         from scrapling.fetchers import FetcherSession
 
         url = self.base_url + path
@@ -97,14 +101,15 @@ class SiteClient:
             impersonate=random.choice(impersonate) if isinstance(impersonate, list) else impersonate,
             stealthy_headers=False,           # 头由 _headers() 契约组装
             timeout=self.TIMEOUT_READ,
-            retries=0,                        # 重试语义由本类 429 逻辑管理
+            retries=1,
             proxy=self._proxy_url(),
         ) as s:
-            kwargs: dict[str, Any] = {"headers": self._headers(), "redirects": "safe"}
+            kwargs: dict[str, Any] = {"headers": self._headers()}
             if body is not None:
                 kwargs["json"] = body
             r = getattr(s, method)(url, **kwargs)
-            return CallResult(ok=True, status=r.status, raw=r.body.decode("utf-8", "replace"))
+            body_str = r.body.decode("utf-8", "replace") if isinstance(r.body, bytes) else str(r.body)
+            return CallResult(ok=True, status=r.status, raw=body_str)
 
     # ---------- 通用调用(含 429 退避 + WAF 假 200 识别) ----------
 

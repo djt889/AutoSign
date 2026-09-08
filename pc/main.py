@@ -41,6 +41,13 @@ def health():
     return {"ok": True, "engine": "python-scrapling", "version": app.version}
 
 
+@app.post("/api/setup")
+def setup_builtin_sites():
+    """初始化:装入内置四站(已存在的跳过,用户删除的不复活)。"""
+    cfg = config.setup_builtin()
+    return {"ok": True, "sites": [_mask_site(s) for s in cfg.get("sites", [])]}
+
+
 @app.get("/api/sites")
 def list_sites():
     cfg = config.load()
