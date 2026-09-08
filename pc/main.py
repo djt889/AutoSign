@@ -7,6 +7,7 @@ P1+ 再挂:checkin / oauth / credentials / scheduler / SSE(见设计文档 §4.3
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -22,6 +23,7 @@ from .engine.oauth_flow import AuthResult, authorize, set_manual_code
 from .engine.site_client import QUOTA_PER_UNIT_DEFAULT, SiteClient
 from .engine.silent_auth import clear_cooldown, exchange
 from .service import config, db
+from .service.scheduler import run_all_once, scheduler_status, start_scheduler
 
 app = FastAPI(title="justsign", version="0.1.0-py")
 
@@ -67,7 +69,11 @@ def list_accounts():
     for s in cfg.get("sites", []):
         for a in s.get("accounts") or []:
             flat.append({
-                **a, "token": _mask(a.get("token")),
+                **{k: v for k, v in a.items() if k != "encCredential"},
+                "token": _mask(a.get("token")),
+                "siteCookie": _mask(a.get("siteCookie")),
+                "encCredential": bool(a.get("encCredential")),
+                "checkinType": s.get("checkinType"),
                 "siteKey": s["key"], "siteName": s.get("name", s["key"]),
             })
     return {"ok": True, "tokens": flat}
@@ -113,6 +119,70 @@ def checkin(account_key: str):
     site, acc = found
     report = run_checkin(site, acc, cfg)
     return report.to_dict()
+
+
+# ---------- 设置 / 调度 / SSE ----------
+
+@app.get("/api/settings")
+def get_settings():
+    cfg = config.load()
+    sch = dict(cfg.get("schedule") or {})
+    sch.update(scheduler_status())
+    return {"ok": True, "schedule": sch, "proxy": cfg.get("proxy") or {}}
+
+
+@app.post("/api/settings/save")
+def settings_save(body: dict):
+    cfg = config.load()
+    if isinstance(body.get("schedule"), dict):
+        s = body["schedule"]
+        cfg["schedule"] = {
+            "enabled": bool(s.get("enabled")),
+            "time": str(s.get("time") or "09:05"),
+        }
+    if isinstance(body.get("proxy"), dict):
+        p = body["proxy"]
+        cfg["proxy"] = {
+            "enabled": bool(p.get("enabled")), "type": "socks5",
+            "host": str(p.get("host") or "127.0.0.1"),
+            "port": int(p.get("port") or 10808),
+        }
+    config.save(cfg)
+    start_scheduler()          # 保存即生效(重启或停用)
+    db.append_log("*", "*", "settings-save",
+                  {"schedule": cfg.get("schedule"), "proxyEnabled": (cfg.get("proxy") or {}).get("enabled")})
+    return {"ok": True}
+
+
+@app.post("/api/run-all")
+def run_all():
+    """立即对所有已授权账号串行跑一轮(手动触发,与 cron 同一入口)。"""
+    def worker():
+        run_all_once(trigger="manual")
+    threading.Thread(target=worker, daemon=True, name="run-all").start()
+    return {"ok": True, "message": "已触发(后台串行执行,看实时日志)"}
+
+
+@app.get("/api/events")
+async def events():
+    """SSE 实时日志流:订阅 db 追加,断线由前端 EventSource 自动重连。"""
+    import asyncio
+    from fastapi.responses import StreamingResponse
+
+    async def gen():
+        last_idx = 0
+        while True:
+            logs = db.recent_logs(300)
+            if len(logs) > 0:
+                # recent_logs 最新在前;发送比上次多的部分
+                new = logs[:max(0, len(logs) - last_idx)] if last_idx else logs[:20]
+                for l in reversed(new):
+                    yield f"data: {json.dumps(l, ensure_ascii=False)}\n\n"
+                last_idx = len(logs)
+            await asyncio.sleep(2)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/history")
@@ -297,6 +367,46 @@ def oauth_headful(body: dict):
     return {"ok": True, "task": task_id, "hint": "浏览器已弹出,完成后自动落盘凭据"}
 
 
+@app.post("/api/oauth/manual")
+def oauth_manual(body: dict):
+    """手动登录授权模式(给不存密码/2FA 的账号):
+    弹可见浏览器,用户自己完成 GitHub 登录+2FA+授权,
+    登录态存 user_data_dir —— 之后静默换凭据全走已存会话,零凭据存储。
+    """
+    account_key = body.get("accountKey", "")
+    cfg = config.load()
+    found = config.find_account(cfg, account_key)
+    if not found:
+        raise HTTPException(404, "账号不存在")
+    site, acc = found
+    clear_cooldown(account_key)
+
+    task_id = f"oauth-m_{int(time.time() * 1000)}"
+
+    def worker():
+        with _task_lock:
+            _oauth_tasks[task_id] = {"state": "running",
+                                     "message": "手动授权中:请在弹出的浏览器里完成 GitHub 登录(密码/2FA 由你自己输入)"}
+        try:
+            # credential=None:绝不自动填充;用户全手动,但 GitHub 会话仍持久化
+            r: AuthResult = authorize(site, acc, cfg, None, headful=True)
+            with _task_lock:
+                _oauth_tasks[task_id] = {
+                    "state": r.state, "message": r.message,
+                    "manualUrl": r.manual_url, "login": r.github_login,
+                }
+            if r.state == "ok":
+                from .engine.silent_auth import _persist
+                _persist(site, acc, r)
+        except Exception as e:
+            with _task_lock:
+                _oauth_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+
+    threading.Thread(target=worker, daemon=True, name=f"oauth-m-{account_key}").start()
+    return {"ok": True, "task": task_id,
+            "hint": "浏览器已弹出;登录一次后 GitHub 会话持久化,之后全自动"}
+
+
 @app.get("/api/oauth/status")
 def oauth_status(task: str):
     with _task_lock:
@@ -333,6 +443,11 @@ def reauth(account_key: str):
 # 静态 WebUI(原 src/index.html 迁入,P3 打磨)
 if STATIC_DIR.exists():
     app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+
+
+@app.on_event("startup")
+def _start():
+    start_scheduler()
 
 
 @app.get("/")

@@ -102,7 +102,7 @@ def _fetch_turnstile_token_headless(base_url: str, site_key: str, sitekey: str,
     )
     if proxy:
         kwargs["proxy"] = proxy
-    StealthyFetcher.fetch(base_url + "/login", **kwargs)
+    _fetch_cf_safe(base_url + "/login", kwargs)
     return holder["token"]
 
 
@@ -153,8 +153,20 @@ def _checkin_via_stealthy(site: dict, account: dict, cfg: dict,
     proxy = _proxy_url(cfg)
     if proxy:
         kwargs["proxy"] = proxy
-    StealthyFetcher.fetch(base_url + "/login", **kwargs)
+    _fetch_cf_safe(base_url + "/login", kwargs)
     return holder["result"]
+
+
+def _fetch_cf_safe(url: str, kwargs: dict[str, Any]) -> Any:
+    """StealthyFetcher.fetch + solve_cloudflare 降级(页面无挑战时 scrapling 抛错)。"""
+    from scrapling.fetchers import StealthyFetcher
+    try:
+        return StealthyFetcher.fetch(url, **kwargs)
+    except Exception as e:
+        if "cloudflare" not in str(e).lower():
+            raise
+        kwargs.pop("solve_cloudflare", None)
+        return StealthyFetcher.fetch(url, **kwargs)
 
 
 def _account_cookies(cookie_header: str) -> list[dict]:

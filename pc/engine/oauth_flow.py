@@ -226,16 +226,19 @@ def authorize(site: dict, account: dict, cfg: dict,
     from scrapling.fetchers import StealthyFetcher
 
     sk, ak = site.get("key", "?"), account.get("key", "?")
+    # state/client_id 是公开接口:用匿名 client(不带旧凭据头)——
+    # 实测 JustDoWork 对带失效 Bearer 的 state 请求回 401
+    anon_client = SiteClient(site, {}, cfg)
     client = SiteClient(site, account, cfg)
     base = client.base_url
     site_host = urlparse(base).hostname or ""
 
     # 1. flow_token + client_id
-    flow_token, err = fetch_state(client)
+    flow_token, err = fetch_state(anon_client)
     if err:
         db.append_log(sk, ak, "oauth", {"step": "state", "error": err}, "err")
         return AuthResult("failed", f"获取授权会话失败: {err}")
-    client_id = fetch_client_id(client)
+    client_id = fetch_client_id(anon_client)
     want_login = str(account.get("githubAccount") or "").strip()
     auth_url = ("https://github.com/login/oauth/authorize"
                 f"?client_id={quote(client_id)}&state={quote(flow_token)}"
@@ -260,6 +263,17 @@ def authorize(site: dict, account: dict, cfg: dict,
             except Exception:
                 pass
         page.on("framenavigated", on_nav)
+        # 请求级监听(比 framenavigated 更底层):整页 302、XHR、fetch 全捕。
+        # 实测 AgentRouter 回调是整页跳转,framenavigated 抓不到中间 URL,
+        # 但每个导航前的 request 会带完整 ?code= 查询串。
+        def on_request(req):
+            try:
+                u = req.url
+                if "code=" in u and ("oauth" in u or site_host in u):
+                    holder["chain"].append(u)
+            except Exception:
+                pass
+        page.on("request", on_request)
 
         # 等待最终落点:回调页(站点域)。
         # GitHub 登录墙出现时:有凭据 ⇒ 立即自动填充(登录/2FA)后继续等;
@@ -269,6 +283,19 @@ def authorize(site: dict, account: dict, cfg: dict,
         for _ in range(max_wait):
             url = page.url
             host = urlparse(url).hostname or ""
+            # GitHub 授权确认页(带 login= 参数或首次授权时出现):自动点 Authorize
+            if host == "github.com" and "/oauth/authorize" in url:
+                try:
+                    # 只点明确的授权按钮(防误点 Cancel/拒绝被 GitHub 记忆成 deny)
+                    btn = page.locator("#oauth-authorize-authorization-code")
+                    if not btn.count():
+                        btn = page.locator("button.js-oauth-authorize-btn")
+                    if btn.count() and btn.first.is_visible():
+                        btn.first.click()
+                        page.wait_for_timeout(2000)
+                        continue
+                except Exception:
+                    pass
             if host == site_host:
                 # 站点域:URL 链里可能有带 code 的中间跳转,优先用链判定;
                 # 同时导出浏览器站点 cookie(httpOnly session 完整版——
@@ -309,7 +336,9 @@ def authorize(site: dict, account: dict, cfg: dict,
         holder["github_ok"] = False   # 超时
 
     kwargs: dict[str, Any] = dict(
-        headless=not headful, solve_cloudflare=True, network_idle=True,
+        headless=not headful, solve_cloudflare=True,
+        # 不用 network_idle:AgentRouter console 页持续轮询,idle 永不满足,
+        # page_action 会被卡到 timeout(实测);等待逻辑由 action 内循环承担
         timeout=600000 if headful else 180000,   # 有头模式给 10 分钟现场操作
         user_data_dir=prj, page_action=action,
         block_ads=True,
@@ -319,7 +348,16 @@ def authorize(site: dict, account: dict, cfg: dict,
     proxy = _proxy_url(cfg)
     if proxy:
         kwargs["proxy"] = proxy
-    resp = StealthyFetcher.fetch(auth_url, **kwargs)
+    try:
+        resp = StealthyFetcher.fetch(auth_url, **kwargs)
+    except Exception as e:
+        # scrapling 实测:页面无 CF 挑战时 solve_cloudflare 抛
+        # 'No Cloudflare challenge found' —— 降级重试(去掉求解参数)
+        if "cloudflare" not in str(e).lower():
+            raise
+        kwargs.pop("solve_cloudflare", None)
+        db.append_log(sk, ak, "oauth", {"step": "fetch-retry-no-cf"}, "err")
+        resp = StealthyFetcher.fetch(auth_url, **kwargs)
 
     # 3b. capture_xhr 保险:回调页前端自己 GET /api/oauth/{provider}?code&state,
     #     响应里就有凭据——URL 链漏抓时直接从这里拿
@@ -339,9 +377,34 @@ def authorize(site: dict, account: dict, cfg: dict,
             continue
 
     final_url = holder["final_url"]
-    # 3. 回调判定:遍历导航链找带 code 的回调 URL
-    #    (SPA 前端会消费 code 后跳 dashboard,终态 URL 不带 code——
-    #     这是原版 onPageStarted 拦中间跳转的等价实现)
+    # 3. 落库判定(v1.4 实战定案,优先级):
+    #    a) 已落站点域 + 浏览器有站点 session cookie ⇒ 前端已完成交换,
+    #       浏览器 cookie 就是生效凭据,直接落库(code/交换响应都不需要——
+    #       code 一次性,前端消费后服务端再换必失败,实测 AgentRouter)
+    #    b) 导航链上有带 code 的回调 ⇒ 服务端直调交换(纯 token 型站)
+    #    c) capture_xhr 捕获前端交换响应(备用)
+    landed = urlparse(final_url).hostname == site_host or any(
+        urlparse(u).hostname == site_host for u in (holder["chain"] or []))
+    if landed and holder["site_cookies"]:
+        creds = {"token": "", "github_login": want_login,
+                 "github_id": "", "site_user_id": ""}
+        try:
+            probe = SiteClient(site, {**account, "siteCookie": holder["site_cookies"]}, cfg)
+            sr = probe.call("get", "/api/user/self")
+            if sr.status == 200 and isinstance(sr.data, dict):
+                d = sr.data.get("data") or {}
+                creds.update({
+                    "github_login": d.get("username") or want_login,
+                    "github_id": str(d.get("github_user_id") or d.get("github_id") or ""),
+                    "site_user_id": str(d.get("id") or ""),
+                })
+        except Exception:
+            pass
+        db.append_log(sk, ak, "oauth", {"step": "done-via-browser-cookie",
+                                        "hasCookie": True})
+        return _finish_auth(sk, ak, site, account, creds, cfg,
+                            browser_cookies=holder["site_cookies"])
+
     cb = CallbackCheck()
     for u in holder["chain"] or [final_url]:
         c = check_callback(u, site_host, flow_token)
@@ -360,9 +423,15 @@ def authorize(site: dict, account: dict, cfg: dict,
                                         "url": cb.safe}, "err")
         return AuthResult("failed", "授权回调 state 校验失败(防串流),请重试", manual_url=auth_url)
     if cb.missing_code:
+        # GitHub 显式拒绝(error=access_denied):授权偏好被记忆为 deny,
+        # 需到 GitHub Settings→Applications 撤销该应用后重试
+        denied = "access_denied" in final_url
         db.append_log(sk, ak, "oauth", {"step": "callback", "verdict": "missing-code",
-                                        "url": cb.safe}, "err")
-        return AuthResult("failed", "未获取到授权码(可能授权被拒绝)", manual_url=auth_url)
+                                        "denied": denied, "url": cb.safe}, "err")
+        msg = ("GitHub 拒绝了授权(error=access_denied):请到 GitHub → Settings → "
+               "Applications → Authorized OAuth Apps 撤销该应用后重试"
+               if denied else "未获取到授权码(可能授权被拒绝)")
+        return AuthResult("failed", msg, manual_url=auth_url)
     if not cb.should_exchange:
         if NEED_MANUAL_URL_RE.search(final_url):
             db.append_log(sk, ak, "oauth", {"step": "github-wall", "url": final_url[:80]}, "err")
@@ -374,7 +443,7 @@ def authorize(site: dict, account: dict, cfg: dict,
         return AuthResult("failed", f"授权超时(最终落点 {urlparse(final_url).hostname})", manual_url=auth_url)
 
     # 4. 交换(服务端直调,主交换响应直接抓 Set-Cookie;code 一次性,不重放)
-    ex = client.call("get", f"/api/oauth/github?code={quote(cb.code)}&state={quote(cb.state)}")
+    ex = anon_client.call("get", f"/api/oauth/github?code={quote(cb.code)}&state={quote(cb.state)}")
     if ex.status != 200 or not isinstance(ex.data, dict) or not ex.data.get("success"):
         msg = ex.error or f"交换失败(HTTP {ex.status})"
         db.append_log(sk, ak, "oauth", {"step": "exchange", "http": ex.status}, "err")
