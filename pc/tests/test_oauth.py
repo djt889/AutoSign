@@ -251,30 +251,55 @@ def test_b1_identity_check():
 # ---------- 凭据库 ----------
 
 def test_credentials_roundtrip(monkeypatch, tmp_path):
+    """全局凭据库:同 githubUser 去重;账号凭据走 credentialId 引用,落盘密文。"""
     from pc.engine import credentials as cr
     config, db, crypto = _patch(monkeypatch, tmp_path)
     config.save(make_account_cfg(tmp_path))
 
-    assert cr.save_credential("a1", username="user@x.com", password="pw1",
-                              totp_secret="JBSWY3DPEHPK3PXP")
-    cred = cr.get_credential("a1")
+    # upsert 同 githubUser 两次 → 只一条(duplicated)
+    r1 = cr.upsert_credential(github_user="user@x.com", alias="u1", password="pw1",
+                              twofa="JBSWY3DPEHPK3PXP")
+    assert r1["created"] is True and r1["duplicated"] is False
+    r2 = cr.upsert_credential(github_user="user@x.com", alias="u2")   # 同 github 去重
+    assert r2["duplicated"] is True and r2["id"] == r1["id"]
+    assert cr.list_credentials()[0]["githubUser"] == "user@x.com"
+
+    # 落盘密文(全局 credentials[])
+    cfg_raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    c0 = cfg_raw["credentials"][0]
+    assert c0["password"].startswith("enc:") and "pw1" not in c0["password"]
+
+    # 账号绑定 credentialId → credential_of 取明文
+    cfg = config.load()
+    _, acc = config.find_account(cfg, "a1")
+    acc["credentialId"] = r1["id"]
+    config.save(cfg)
+    cred = cr.credential_of(acc)
     assert cred == {"username": "user@x.com", "password": "pw1",
                     "totpSecret": "JBSWY3DPEHPK3PXP"}
-    # 落盘的是密文
-    cfg_raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
-    enc = cfg_raw["sites"][0]["accounts"][0]["encCredential"]
-    assert enc.startswith("enc:")
-    assert "pw1" not in enc
+
+    # 字段空串 = 清除;None = 不修改
+    cr.upsert_credential(credential_id=r1["id"], password="")
+    assert cr.credential_of(acc)["password"] == ""
+    cr.upsert_credential(credential_id=r1["id"], password="pw2")
+    assert cr.credential_of(acc)["password"] == "pw2"
 
     # TOTP 现场生成
-    code = cr.totp_now(cred)
+    code = cr.totp_now(cr.credential_of(acc))
     assert len(code) == 6 and code.isdigit()
 
-    # 字段空串 = 保留原值
-    assert cr.save_credential("a1", username="new@x.com")
-    assert cr.get_credential("a1")["username"] == "new@x.com"
-    assert cr.get_credential("a1")["password"] == "pw1"
-    assert cr.get_credential("nope") == {}
+    # 无 credentialId 的账号回退 encCredential 旧格式(兼容)
+    cfg = config.load()
+    _, acc2 = config.find_account(cfg, "a1")
+    acc2.pop("credentialId", None)
+    acc2["encCredential"] = crypto.encrypt(
+        '{"username":"legacy@x.com","password":"oldpw","totpSecret":""}')
+    config.save(cfg)
+    assert cr.credential_of(acc2)["password"] == "oldpw"
+
+    # 删除凭据
+    assert cr.delete_credential(r1["id"]) is True
+    assert cr.delete_credential(r1["id"]) is False
 
 
 # ---------- state 双形态 ----------

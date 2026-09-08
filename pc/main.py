@@ -18,7 +18,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .engine.checkin import run_checkin
-from .engine.credentials import get_credential, save_credential
+from .engine.credentials import (delete_credential, get_credential,
+                              list_credentials, migrate_legacy_enc,
+                              save_credential, upsert_credential)
 from .engine.oauth_flow import AuthResult, authorize, set_manual_code
 from .engine.site_client import QUOTA_PER_UNIT_DEFAULT, SiteClient
 from .engine.silent_auth import clear_cooldown, exchange
@@ -68,11 +70,20 @@ def list_accounts():
     flat = []
     for s in cfg.get("sites", []):
         for a in s.get("accounts") or []:
+            cred_name = ""
+            if a.get("credentialId"):
+                for _c in (cfg.get("credentials") or []):
+                    if _c.get("id") == a.get("credentialId"):
+                        cred_name = (_c.get("alias") or _c.get("githubUser")
+                                     or a.get("credentialId"))
+                        break
             flat.append({
                 **{k: v for k, v in a.items() if k != "encCredential"},
                 "token": _mask(a.get("token")),
                 "siteCookie": _mask(a.get("siteCookie")),
                 "encCredential": bool(a.get("encCredential")),
+                "credentialId": a.get("credentialId") or "",
+                "credentialName": cred_name,
                 "checkinType": s.get("checkinType"),
                 "siteKey": s["key"], "siteName": s.get("name", s["key"]),
             })
@@ -249,6 +260,14 @@ def account_logs(account_key: str, category: str = "系统", limit: int = 50, pa
     return {"ok": r.status == 200, "http": r.status, "rows": rows, "lastBonus": last_bonus}
 
 
+@app.post("/api/credentials/migrate")
+def credentials_migrate():
+    """迁移旧 encCredential(账号内嵌)到全局凭据库。"""
+    n = migrate_legacy_enc()
+    db.append_log("*", "*", "credential-migrate", {"migrated": n})
+    return {"ok": True, "migrated": n}
+
+
 @app.get("/api/history")
 def history():
     return {"ok": True, "data": db.recent_logs(300)}
@@ -313,6 +332,15 @@ def accounts_save(body: dict):
         site["accounts"].append(acc)
     if body.get("alias"):
         acc["alias"] = str(body["alias"]).strip()
+    # 凭据库引用(原版模型):绑定的凭据决定 githubAccount / 自动填充
+    if body.get("credentialId"):
+        acc["credentialId"] = body["credentialId"]
+        for _c in (cfg.get("credentials") or []):
+            if _c.get("id") == body["credentialId"]:
+                gh = _c.get("githubUser") or _c.get("siteAccount") or ""
+                if gh:
+                    acc["githubAccount"] = gh
+                break
     from .service.secret_store import seal
     for f in ("githubAccount", "siteUserId"):
         if body.get(f) is not None:
@@ -344,8 +372,43 @@ def accounts_delete(account_key: str):
 
 # ---------- 凭据库 ----------
 
+@app.get("/api/credentials")
+def credentials_list():
+    """全局凭据库:同一 GitHub 账号一条,与站点解耦(对齐原版 v0.2.0)。"""
+    return {"ok": True, "credentials": list_credentials()}
+
+
+@app.post("/api/credentials")
+def credentials_upsert(body: dict):
+    """新增/更新全局凭据;同 githubUser 自动去重返回已有。"""
+    try:
+        r = upsert_credential(
+            alias=str(body.get("alias", "") or ""),
+            github_user=str(body.get("githubUser", "") or ""),
+            site_account=str(body.get("siteAccount", "") or ""),
+            password=body.get("password") if "password" in body else None,
+            twofa=body.get("twofa") if "twofa" in body else None,
+            note=str(body.get("note", "") or ""),
+            credential_id=str(body.get("id", "") or ""),
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    db.append_log("*", r["id"], "credential-save",
+                  {"githubUser": body.get("githubUser", ""), "dup": r["duplicated"]})
+    return {"ok": True, **r, "hint": "已加密存储(读不回显)"}
+
+
+@app.delete("/api/credentials/{credential_id}")
+def credentials_delete(credential_id: str):
+    if not delete_credential(credential_id):
+        raise HTTPException(404, "凭据不存在")
+    db.append_log("*", credential_id, "credential-delete", None)
+    return {"ok": True}
+
+
 @app.post("/api/credentials/{account_key}")
 def credentials_save(account_key: str, body: dict):
+    """旧路径兼容:为账号写/绑定凭据(自动建全局凭据并引用)。"""
     if not save_credential(
         account_key,
         username=str(body.get("username", "") or ""),

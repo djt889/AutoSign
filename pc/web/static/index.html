@@ -269,13 +269,16 @@ function renderSettings(){
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <button class="btn lb sm" onclick="addSiteSheet()">＋ 添加站点</button>
       <button class="btn lb sm" onclick="post('/setup').then(()=>{toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
-  <div class="msetcard"><h3>账号</h3>
+  <div class="msetcard"><h3>账号 · 凭据库</h3>
     ${TKS.map(a=>{const s=siteOf(a.siteKey);return `<div class="mset-it"><span class="nm">${esc(a.alias||a.key)}</span>
-      <span class="cur">@ ${esc(s?.name||a.siteKey)}</span><span class="sp"></span>
+      <span class="cur">@ ${esc(s?.name||a.siteKey)}${a.credentialName?` · 凭据「${esc(a.credentialName)}」`:''}</span><span class="sp"></span>
       ${authed(a)?'<span class="pill g">已授权</span>':'<span class="pill o">待授权</span>'}
-      ${a.encCredential?'<span class="pill b">全自动</span>':''}
+      ${a.credentialName?'<span class="pill b">凭据✓</span>':(a.encCredential?'<span class="pill b">全自动</span>':'')}
       <span style="color:var(--sub2);cursor:pointer" onclick="accMenu('${a.key}')">⋯</span></div>`}).join('')||'<div class="hint" style="padding:4px 0">暂无账号</div>'}
-    <div style="margin-top:8px"><button class="btn lb sm w100" onclick="addAccSheet()">＋ 添加账号</button></div></div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn b sm w100" onclick="addAccSheet()">＋ 为站点添加账号(从凭据库选)</button>
+      <button class="btn lb sm w100" onclick="credListSheet()">🔑 账号凭据库(录入 GitHub 账号)</button></div>
+    <div class="hint" style="margin-top:6px">同一 GitHub 账号凭据全局一条,可绑定多个站点;给新站点加账号不用重新录密码。</div></div>
   <div class="msetcard"><h3>引擎</h3>
     <div class="mset-it"><span class="nm">⏰ 定时调度</span><span class="sp"></span><span class="cur">${CFG?.schedule?.enabled?'每天 '+CFG.schedule.time:'未启用'}</span><button class="btn lb sm" onclick="schedSheet()">设置</button></div>
     <div class="mset-it"><span class="nm">🛡 SOCKS5 代理</span><span class="sp"></span><span class="cur">${CFG?.proxy?.enabled?CFG.proxy.host+':'+CFG.proxy.port:'关闭'}</span><button class="btn lb sm" onclick="proxySheet()">设置</button></div>
@@ -326,13 +329,85 @@ async function startOAuth(k,mode){busy(true,mode==='auto'?'headless 全自动授
     if(s.state==='running'){busy(true,s.message||'授权中…');setTimeout(tick,3000);}
     else{busy(false);toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+s.message);refresh();}};
   tick();}
-/* 账号/站点 弹层表单 */
+/* 账号添加:原版交互——从全局凭据库选(同 GitHub 一条,不重复新建),或录入新凭据 */
 function addAccSheet(siteKey){
   const sites=CFG?.sites||[];
-  openSheet('添加账号',`${siteKey?'':`<div class="fld"><label>站点</label><select id="aa_site">${sites.map(s=>`<option value="${s.key}">${esc(s.name)}</option>`).join('')}</select></div>`}
-  <div class="fld"><label>别名</label><input id="aa_alias" placeholder="gh1"></div>
-  <div class="fld"><label>GitHub 用户名(可选)</label><input id="aa_gh"></div>
-  <button class="btn b w100" onclick="saveAcc('${siteKey||''}')">保存</button>`);}
+  const loadCreds=async()=>{
+    const c=await api('/credentials');
+    const creds=c.credentials||[];
+    const siteSel=siteKey?'':`<div class="fld"><label>绑定站点</label><select id="aa_site">${sites.map(s=>`<option value="${s.key}">${esc(s.name)}</option>`).join('')}</select></div>`;
+    if(!creds.length){
+      openSheet('为站点添加账号',siteSel+`<div class="hint" style="margin-bottom:6px">凭据库为空,请先录入 GitHub 凭据(密码/2FA 加密存储,同 GitHub 账号全局一条)。</div>
+      <button class="btn b w100" onclick="credFormSheet()">录入新账号凭据…</button>`);
+      return;
+    }
+    openSheet('为站点添加账号',siteSel+`<div class="hint" style="margin-bottom:6px">选择凭据(同一 GitHub 账号只需录一次,可绑定到多个站点):</div>
+      ${creds.map(c=>`<div class="menu-item" onclick="addAccWithCred('${siteKey||''}','${c.id}','${esc(c.alias||c.githubUser)}','${esc(c.githubUser||'')}')">
+        <span style="font-weight:700;color:var(--blue)">${esc(c.alias||c.githubUser||c.id)}</span>
+        ${c.githubUser?`<span class="hint">${esc(c.githubUser)}</span>`:''}
+        <span style="flex:1"></span>
+        ${c.hasPassword&&c.hasTwofa?'<span class="pill b">全自动</span>':(c.hasPassword?'<span class="pill b">有密码</span>':'')}
+        ${c.hasTwofa?'<span class="pill o">2FA</span>':''}
+      </div>`).join('')}
+      <div class="menu-item" onclick="credFormSheet()"><span style="color:var(--blue)">＋</span><span class="hint">录入新账号凭据…</span></div>`);
+  };
+  loadCreds();
+}
+async function addAccWithCred(siteKey,credId,alias,gh){
+  const k=siteKey||$('#aa_site').value;
+  if(!k){toast('请选择站点');return;}
+  // 站点下已有同凭据账号 → 直接授权不重复建(原版语义)
+  const site=siteOf(k);
+  const dup=(site?.accounts||[]).find(a=>a.credentialId===credId);
+  if(dup){toast('该凭据在此站已有账号,直接走授权');closeSheet();openAuth(dup.key,'auto');return;}
+  const r=await post('/accounts/save',{siteKey:k,alias:alias||gh||undefined,credentialId:credId});
+  if(r.ok){toast('已绑定凭据,开始授权');closeSheet();refresh();
+    // 新账号自动开始授权
+    const accs=await api('/accounts');
+    const created=accs.tokens?.find(a=>a.siteKey===k&&a.credentialId===credId);
+    if(created)startOAuth(created.key,'auto');
+  }else toast(r.detail||'失败');
+}
+/* 凭据库管理:录入/编辑(同 githubUser 去重) */
+function credFormSheet(cid){
+  const c=(cid?(window.__creds||[]).find(x=>x.id===cid):null)||{};
+  openSheet(cid?'编辑凭据':'录入新账号凭据',`<div class="hint" style="margin-bottom:8px">同一 GitHub 账号只需录入一次(密码/2FA AES-256-GCM 加密),可绑定到任意多个站点。</div>
+  <div class="fld"><label>备注名(可留空用 GitHub 名)</label><input id="cf_alias" value="${esc(c.alias||'')}" placeholder="如 主号"></div>
+  <div class="fld"><label>GitHub 用户名</label><input id="cf_gh" value="${esc(c.githubUser||'')}" placeholder="AI模型API"></div>
+  <div class="fld"><label>GitHub 密码(留空则不修改/不设置)</label><input id="cf_pw" type="password"></div>
+  <div class="fld"><label>TOTP 密钥(2FA setup key,无则留空)</label><input id="cf_tp" value="${esc(c.totpSecret||'')}" placeholder="如 JBSWY3DPEHPK3PXP"></div>
+  <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>`);
+}
+async function saveCredForm(cid){
+  const body={};
+  if(cid)body.id=cid;
+  const al=$('#cf_alias').value.trim(); if(al)body.alias=al;
+  const gh=$('#cf_gh').value.trim(); if(gh)body.githubUser=gh;
+  const pw=$('#cf_pw').value; if(pw)body.password=pw; else if(cid)body.password='';
+  const tp=$('#cf_tp').value.trim(); if(tp)body.twofa=tp;
+  if(!cid&&!gh){toast('需要 GitHub 用户名');return;}
+  const r=await post('/credentials',body);
+  toast(r.ok?((r.duplicated?'已复用已有凭据':'凭据已保存')):(r.detail||'失败'));
+  if(r.ok){closeSheet();refresh();}
+}
+function credListSheet(){
+  openSheet('账号凭据库',`<div class="hint" style="margin-bottom:6px">全局凭据库:同一 GitHub 账号一条,绑定到多个站点账号复用。</div>
+  <div id="credListBody">加载中…</div>
+  <button class="btn b w100" onclick="credFormSheet()">＋ 录入新账号凭据</button>`);
+  api('/credentials').then(c=>{
+    window.__creds=c.credentials||[];
+    $('#credListBody').innerHTML=(c.credentials||[]).map(x=>`<div class="menu-item">
+      <span style="font-weight:700;color:var(--blue)">${esc(x.alias||x.githubUser||x.id)}</span>
+      ${x.githubUser?`<span class="hint">${esc(x.githubUser)}</span>`:''}
+      ${x.hasPassword&&x.hasTwofa?'<span class="pill b">全自动</span>':(x.hasPassword?'<span class="pill b">有密码</span>':'')}
+      ${x.hasTwofa?'<span class="pill o">2FA</span>':''}
+      <span style="flex:1"></span>
+      <span style="color:var(--blue);font-size:12px;cursor:pointer" onclick="credFormSheet('${x.id}')">编辑</span>
+      <span style="color:var(--red);font-size:12px;cursor:pointer;margin-left:10px" onclick="delCred('${x.id}')">删除</span></div>`).join('')||'<div class="hint">暂无凭据</div>';
+  });
+}
+async function delCred(id){confirmDlg('删除凭据','确认删除该凭据?已绑定它的站点账号将失去自动填充,但登录态仍在。',async()=>{await api('/credentials/'+id,{method:'DELETE'});toast('已删除');credListSheet();});}
+/* 兼容旧:直接输 GitHub 名建账号(无凭据时兜底) */
 async function saveAcc(siteKey){const k=siteKey||$('#aa_site').value;
   const r=await post('/accounts/save',{siteKey:k,alias:$('#aa_alias').value.trim(),githubAccount:$('#aa_gh').value.trim()||undefined});
   toast(r.ok?'已保存':'失败');if(r.ok){closeSheet();refresh();}}
