@@ -3,330 +3,442 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>公益AI中转站 · 自动签到台</title>
+<title>AutoSign</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1220;color:#e6e8f0;display:flex;height:100vh;overflow:hidden}
-#app{display:flex;width:100%}
-/* 侧栏 */
-.side{width:180px;background:#161a2e;padding:18px 10px;display:flex;flex-direction:column;gap:6px;border-right:1px solid #252a45}
-.side .logo{font-size:16px;font-weight:700;color:#8ab4ff;margin:0 8px 14px}
-.tab{padding:9px 12px;border-radius:10px;cursor:pointer;font-size:13px;color:#9aa3bf;display:flex;gap:8px;align-items:center}
-.tab.on{background:#1f2550;color:#fff}
-.tab:hover{color:#fff}
-/* 主区 */
-.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.top{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;border-bottom:1px solid #252a45}
-.top h2{font-size:17px}
-.badge{font-size:12px;background:#1f2550;padding:4px 10px;border-radius:10px;color:#8ab4ff}
-.body{flex:1;padding:20px 24px;overflow-y:auto}
-/* 卡片 */
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-bottom:18px}
-.card{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
-.card .lbl{font-size:12px;color:#8a90b8}
-.card .val{font-size:22px;font-weight:700;margin-top:4px}
-.ok{color:#6bdf85}.warn{color:#ffc857}.err{color:#ff7a7a}
-/* 矩阵 */
-.matrix{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
-.matrix h3{font-size:14px;color:#8a90b8;margin-bottom:10px;font-weight:600}
-.row{display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid #202445;font-size:13px}
-.row:last-child{border:none}
-.chip{padding:3px 8px;border-radius:6px;font-size:11px}
-.chip.a{background:#1f3a1f;color:#6bdf85}.chip.b{background:#3a2f1f;color:#ffc857}.chip.c{background:#3a1f1f;color:#ff7a7a}
-.btn{padding:6px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;background:#2a3168;color:#fff}
-.btn:hover{background:#3a4388}
-.btn.sm{padding:4px 9px;font-size:11px}
-.btn.warn{background:#6b5420}.btn.danger{background:#6b2020}
-textarea,input,select{background:#0f1220;border:1px solid #252a45;color:#e6e8f0;padding:7px 10px;border-radius:8px;font-size:13px;width:100%}
-form .f{margin-bottom:10px}
-form label{display:block;font-size:12px;color:#8a90b8;margin-bottom:4px}
-.log{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#0c0e1a;border:1px solid #252a45;border-radius:10px;padding:12px;max-height:400px;overflow-y:auto;line-height:1.6}
-.log .t{color:#8a90b8}.log .e{color:#8ab4ff}
-.hidden{display:none}
-.authstat{margin-top:8px;padding:8px 10px;background:#0c0e1a;border-radius:8px;font-size:12px}
+/* ===== 原版 Android 配色(Ui.java) ===== */
+:root{
+  --bg:#F8F9FA; --card:#FFFFFF; --card-sub:#F9FAFB;
+  --line:#E5E7EB; --line-soft:#F3F4F6;
+  --txt:#111827; --txt2:#1F2937; --sub:#6B7280; --sub2:#9CA3AF;
+  --blue:#2563EB; --blue-bg:#EFF6FF; --blue-deep:#1E40AF;
+  --green:#059669; --green-d:#047857; --green-bg:#D1FAE5; --green-bg2:#F0FDF4;
+  --orange:#D97706; --amber-bg:#FEF3C7;
+  --red:#DC2626; --red-d:#B91C1C; --red-bg:#FEE2E2;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;background:var(--bg);color:var(--txt);height:100vh;height:100dvh;overflow:hidden}
+button{font-family:inherit}
+.pill{display:inline-flex;align-items:center;border-radius:8px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap}
+.pill.g{color:var(--green-d);background:var(--green-bg)}
+.pill.o{color:var(--orange);background:var(--amber-bg)}
+.pill.s{color:var(--sub);background:var(--line-soft)}
+.pill.b{color:var(--blue);background:var(--blue-bg)}
+.pill.r{color:var(--red);background:var(--red-bg)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn.b{background:var(--blue);color:#fff}.btn.lb{background:var(--blue-bg);color:var(--blue)}
+.btn.r{background:var(--red-bg);color:var(--red)}.btn.g{background:var(--green-bg);color:var(--green-d)}
+.btn.sm{padding:3px 10px;font-size:11px}
+.hint{font-size:12px;color:var(--sub);line-height:1.65}
+.sp{flex:1}
+input,select{font-family:inherit;color:var(--txt)}
+
+/* ================= 手机 (≤860px) ================= */
+#mob{display:none;height:100%;flex-direction:column;max-width:600px;margin:0 auto}
+#m-top{background:var(--card);padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;border-bottom:1px solid var(--line-soft)}
+#m-brand .t{font-size:16px;font-weight:800}
+#m-brand .s{font-size:10px;color:var(--sub);margin-top:1px}
+#m-total{display:flex;align-items:center;gap:5px;background:var(--green-bg2);border:1px solid var(--green-bg);border-radius:8px;padding:3px 10px;cursor:pointer}
+#m-total .l{font-size:10px;color:#15803d}#m-total .v{font-size:13px;font-weight:800;color:#15803d}
+#m-busy{display:none;align-items:center;gap:8px;background:var(--card-sub);padding:5px 16px;font-size:12px;color:var(--sub);flex-shrink:0}
+#m-busy .spin{width:12px;height:12px;border:2px solid var(--blue);border-top-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+#m-content{flex:1;overflow-y:auto;padding:12px}
+.site-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.site-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px}
+.site-name{display:flex;align-items:center;color:var(--blue);font-size:15px;font-weight:700;cursor:pointer;width:fit-content}
+.site-meta{font-size:11px;color:var(--sub2);margin-top:2px}
+.acc-box{background:var(--card-sub);border:1px solid var(--line-soft);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.acc-r1{display:flex;align-items:center;justify-content:space-between}
+.acc-ident{display:flex;align-items:center;font-size:13px;font-weight:700;color:var(--txt2)}
+.acc-ident .gh{color:var(--sub);font-weight:400;margin-left:6px;font-size:11px}
+.acc-log{color:var(--sub2);font-size:11px;margin-left:8px;cursor:pointer}
+.acc-r2{display:flex;align-items:center;margin-top:8px;flex-wrap:wrap;gap:6px}
+.acc-r2 .bl{font-size:11px;color:var(--sub)}
+.acc-r2 .bal{font-size:22px;font-weight:800;color:var(--green);margin-left:4px}
+.acc-r3{display:flex;align-items:center;margin-top:8px;font-size:11px;color:var(--sub)}
+.acc-r3 .lnk{color:var(--blue);cursor:pointer;margin-left:8px}
+#m-tab{background:var(--card);padding:6px 8px;display:flex;gap:6px;flex-shrink:0;border-top:1px solid var(--line-soft)}
+.mtab{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 0 6px;border-radius:10px;font-size:10px;font-weight:700;color:var(--sub2);cursor:pointer;user-select:none}
+.mtab.on{background:var(--blue-bg);color:var(--blue)}
+.mtab.solid{background:var(--blue);color:#fff;flex-direction:row;font-size:12px;gap:5px}
+.mtab.soft{background:var(--blue-bg);color:var(--blue);flex-direction:row;font-size:12px;gap:5px}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;color:var(--sub2);text-align:center}
+.empty .e1{font-size:15px;font-weight:700;color:var(--txt2);margin-top:12px}
+.empty .e2{font-size:12px;margin-top:4px}
+.empty .go{margin-top:16px;background:var(--blue-bg);color:var(--blue);padding:8px 16px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer}
+.msetcard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.msetcard h3{font-size:12px;color:var(--sub);font-weight:700;margin-bottom:8px}
+
+/* ================= 桌面 (≥861px) ================= */
+#dsk{display:none;height:100%}
+#dsk-side{width:210px;background:var(--card);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px;flex-shrink:0}
+.dlogo{font-size:17px;font-weight:800;padding:6px 12px 16px;color:var(--txt)}
+.dlogo span{color:var(--blue)}
+.dnav{padding:9px 12px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;color:var(--sub);display:flex;gap:9px;align-items:center;margin-bottom:2px}
+.dnav.on{background:var(--blue-bg);color:var(--blue)}
+#dsk-main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#dsk-top{background:var(--card);border-bottom:1px solid var(--line-soft);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+#dsk-top h2{font-size:16px}
+.dtop-acts{display:flex;gap:8px;align-items:center}
+.dstat{font-size:12px;color:var(--sub);margin-right:10px}
+#dsk-body{flex:1;overflow-y:auto;padding:20px 24px}
+.dcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:18px}
+.dcard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.dcard .lbl{font-size:11px;color:var(--sub)}
+.dcard .val{font-size:24px;font-weight:800;margin-top:3px}
+.dcard .val.g{color:var(--green)}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.panel h3{font-size:13px;color:var(--sub);font-weight:700;margin-bottom:12px}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px}
+table.tbl th{font-size:11px;color:var(--sub);font-weight:700;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.tbl td{padding:10px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+table.tbl tr:last-child td{border-bottom:none}
+table.tbl tr:hover td{background:var(--card-sub)}
+.fmt{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.fmt input,.fmt select{background:var(--card-sub);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px}
+.dsk2col{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.grp{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.grp-h{font-size:12px;color:var(--sub);font-weight:700;padding:13px 14px 6px}
+.grp .git{display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:13px;cursor:pointer;border-top:1px solid var(--line-soft)}
+.grp .git .desc{font-size:11px;color:var(--sub2)}
+.logbox{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:var(--card-sub);border:1px solid var(--line-soft);border-radius:10px;padding:12px;max-height:440px;overflow-y:auto;line-height:1.7;color:var(--txt2);white-space:pre-wrap}
+.dstatb{font-size:12px;color:var(--sub);padding:0 12px;line-height:1.5}
+
+/* 弹层共用 */
+.overlay{position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:50;display:none;align-items:flex-end;justify-content:center}
+.overlay.on{display:flex}
+.sheet{background:var(--card);border-radius:16px 16px 0 0;width:100%;max-width:560px;max-height:82%;display:flex;flex-direction:column;animation:up .22s ease}
+@keyframes up{from{transform:translateY(30px);opacity:.4}to{transform:none;opacity:1}}
+.sheet-head{padding:14px 18px 10px;font-size:15px;font-weight:800;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line-soft)}
+.sheet-body{padding:12px 18px;overflow-y:auto}
+.menu-item{display:flex;align-items:center;gap:10px;padding:11px 4px;font-size:14px;cursor:pointer;border-bottom:1px solid var(--line-soft);color:var(--txt2)}
+.menu-item:last-child{border:none}
+.menu-item.red{color:var(--red)}
+.fld{margin-bottom:12px}
+.fld label{display:block;font-size:11px;color:var(--sub);margin-bottom:4px}
+.fld input,.fld select{width:100%;background:var(--card-sub);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px}
+.fld .row{display:flex;gap:8px}.fld .row>*{flex:1}
+.w100{width:100%;margin-top:6px}
+.dlg{position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:60;display:none;align-items:center;justify-content:center}
+.dlg.on{display:flex}
+.dlg-box{background:var(--card);border-radius:14px;padding:18px;width:78%;max-width:340px}
+.dlg-box h4{font-size:15px;margin-bottom:6px}
+.dlg-box p{font-size:13px;color:var(--sub);margin-bottom:14px;white-space:pre-line}
+.dlg-box .btns{display:flex;gap:8px;justify-content:flex-end}
+.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:9px 16px;border-radius:10px;font-size:13px;z-index:99;max-width:86%;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+
+@media (max-width:860px){#mob{display:flex}#dsk{display:none!important}}
+@media (min-width:861px){#dsk{display:flex}#mob{display:none!important}}
 </style>
 </head>
 <body>
-<div id="app">
-  <div class="side">
-    <div class="logo">🎓 justsign</div>
-    <div class="tab on" data-tab="home">📊 首页总览</div>
-    <div class="tab" data-tab="accounts">👤 账号</div>
-    <div class="tab" data-tab="sites">🌐 站点</div>
-    <div class="tab" data-tab="logs">📝 日志 & 设置</div>
-    <div class="tab" data-tab="settings">⚙️ 引擎设置</div>
+
+<!-- ============ 手机布局 ============ -->
+<div id="mob">
+  <div id="m-top">
+    <div id="m-brand"><div class="t">AutoSign</div><div class="s" id="m-summary">…</div></div>
+    <div id="m-total" onclick="openAssetBreakdown()"><span class="l">总资产</span><span class="v" id="m-totalV">$0.00</span></div>
   </div>
-  <div class="main">
-    <div class="top"><h2 id="title">首页总览</h2>
-      <div><button class="btn sm" id="btnRefreshAll">🔄 刷新全部余额</button> <span class="badge" id="proxyBadge">代理: 检测中</span> <span class="badge" id="schBadge">调度: 关</span></div>
-    </div>
-
-    <!-- HOME -->
-    <div class="body" id="tab-home">
-      <div class="grid">
-        <div class="card"><div class="lbl">账号总数</div><div class="val" id="sumAc">-</div></div>
-        <div class="card"><div class="lbl">站点总数</div><div class="val" id="sumSite">-</div></div>
-        <div class="card"><div class="lbl">已登录</div><div class="val ok" id="sumLogin">-</div></div>
-      </div>
-      <div class="grid" id="quotaGrid"></div>
-      <div class="matrix">
-        <h3>账号 × 站点 登录状态矩阵</h3>
-        <div id="matrix"></div>
-      </div>
-    </div>
-
-    <!-- ACCOUNTS -->
-    <div class="body hidden" id="tab-accounts">
-        <div class="matrix">
-        <h3>添加账号（GitHub 账号 + 站点）</h3>
-        <div id="authPanel" style="display:block;margin-bottom:12px;padding:10px;background:#1f2550;border-radius:10px;font-size:13px">
-          <span id="authEnv">🐍 Python 引擎(Scrapling)</span> 内置授权:
-          <button class="btn" id="btnAuth" style="margin-left:6px">🔑 全自动授权(headless)</button>
-          <button class="btn warn" id="btnAuthManual" style="margin-left:6px">🖥️ 手动登录授权(弹浏览器)</button>
-          <span class="lbl" style="margin-left:8px">全自动=凭据库填账密/2FA 一键完成;手动=自己输密码(不存密码,仅存会话)</span>
-          <div class="authstat hidden" id="authStat"></div>
-        </div>
-        <form id="addForm">
-          <div class="f"><label>账号别名</label><input id="aKey" placeholder="gh1"></div>
-          <div class="f"><label>GitHub 账号名</label><input id="aGh" placeholder="AI模型API"></div>
-          <div class="f"><label>绑定站点</label><select id="aSite"></select></div>
-          <div class="f"><label>access_token（用真实浏览器授权一次后粘贴,可留空走授权）</label><input id="aToken" placeholder="Bearer 后的 access_token"></div>
-          <button class="btn" type="submit">保存账号</button>
-        </form>
-      </div>
-      <div class="matrix"><h3>已存账号</h3><div id="matrix2"></div></div>
-    </div>
-
-    <!-- SITES -->
-    <div class="body hidden" id="tab-sites">
-      <div class="grid" id="siteGrid"></div>
-      <div class="matrix">
-        <h3>添加站点</h3>
-        <form id="siteForm" style="max-width:480px">
-          <div class="f"><label>名称</label><input id="sName" placeholder="MyAPI"></div>
-          <div class="f"><label>API 地址</label><input id="sUrl" placeholder="https://example.com"></div>
-          <div class="f"><label>形态</label><select id="sType"><option value="newapi">newapi(有签到接口)</option><option value="login">login(登录即发额度,每日重登领取)</option></select></div>
-          <button class="btn" type="submit">添加站点</button>
-          <button class="btn" type="button" id="btnSetup" style="margin-left:8px">载入内置四站</button>
-        </form>
-      </div>
-    </div>
-
-    <!-- LOGS -->
-    <div class="body hidden" id="tab-logs">
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <select id="logAc" style="width:160px"><option value="">— 选择账号 —</option></select>
-        <button class="btn" id="btnLogs">查看使用日志(系统)</button>
-        <button class="btn" id="btnHist">查看本地运行日志</button>
-      </div>
-      <div class="log" id="logBox">暂无日志。先添加账号并粘贴 access_token。</div>
-    </div>
-
-    <!-- SETTINGS -->
-    <div class="body hidden" id="tab-settings">
-      <div class="matrix">
-        <h3>引擎设置</h3>
-        <form id="setForm">
-          <div class="f"><label>SOCKS5 代理 主机</label><input id="sHost"></div>
-          <div class="f"><label>SOCKS5 代理 端口</label><input id="sPort"></div>
-          <div class="f"><label><input type="checkbox" id="sSchOn" style="width:auto"> 启用定时签到(每天此时刻, Asia/Shanghai)</label></div>
-          <div class="f"><label>定时签到时刻</label><input id="sCron" type="time" value="09:05"></div>
-          <button class="btn" type="submit">保存</button>
-          <button class="btn warn" type="button" id="btnRunNow" style="margin-left:8px">立即跑一轮全部账号</button>
-        </form>
-      </div>
-    </div>
+  <div id="m-busy"><span class="spin"></span><span id="m-busyT">…</span></div>
+  <div id="m-content">
+    <div id="m-board"></div>
+    <div id="m-settings" style="display:none"></div>
+  </div>
+  <div id="m-tab">
+    <div class="mtab on" id="m-tab0" onclick="mShow(0)">📊 看板</div>
+    <div class="mtab solid" onclick="bulkCheckin()">⚡ 签到</div>
+    <div class="mtab soft" onclick="bulkRefresh()">🔄 刷新</div>
+    <div class="mtab" id="m-tab1" onclick="mShow(1)">⚙️ 设置</div>
   </div>
 </div>
 
+<!-- ============ 桌面布局 ============ -->
+<div id="dsk">
+  <div id="dsk-side">
+    <div class="dlogo">🎓 <span>AutoSign</span></div>
+    <div class="dnav on" data-p="board">📊 看板</div>
+    <div class="dnav" data-p="accounts">👤 账号</div>
+    <div class="dnav" data-p="sites">🌐 站点</div>
+    <div class="dnav" data-p="logs">📝 日志</div>
+    <div class="dnav" data-p="settings">⚙️ 设置</div>
+    <div style="flex:1"></div>
+    <div class="dstatb">余额按需获取<br>10 分钟缓存 · ?force=1 绕过</div>
+  </div>
+  <div id="dsk-main">
+    <div id="dsk-top">
+      <h2 id="dsk-title">看板</h2>
+      <div class="dtop-acts">
+        <span class="dstat" id="dsk-summary">…</span>
+        <button class="btn b" onclick="bulkCheckin()">⚡ 一键签到</button>
+        <button class="btn lb" onclick="bulkRefresh()">🔄 一键刷新</button>
+        <button class="btn lb" onclick="openAssetBreakdown()">💰 总资产 <b id="dsk-total">$0.00</b></button>
+      </div>
+    </div>
+    <div id="dsk-body"></div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay"><div class="sheet"><div class="sheet-head"><span id="sheetTitle"></span><span style="color:var(--sub2);cursor:pointer;font-size:18px;padding:0 4px" onclick="closeSheet()">✕</span></div><div class="sheet-body" id="sheetBody"></div></div></div>
+<div class="dlg" id="dlg"><div class="dlg-box"><h4 id="dlgT"></h4><p id="dlgM"></p><div class="btns"><button class="btn lb" id="dlgNo">取消</button><button class="btn b" id="dlgYes">确定</button></div></div></div>
+
 <script>
-const BASE = '/api';
-const $ = s => document.querySelector(s);
-let CFG = null, TKS = [];
+const $=s=>document.querySelector(s);
+const api=(p,o)=>fetch('/api'+p,o).then(r=>r.json());
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const USD=n=>(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+let CFG=null,TKS=[],dPage='board',mPage=0;
+function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>d.remove(),3000)}
+function busy(on,what){const b=$('#m-busy');if(!b)return;b.style.display=on?'flex':'none';if(what!==undefined)b.querySelector('#m-busyT').textContent=what}
+async function post(p,b){return api(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b||{})})}
 
-async function api(p, opt) {
-  const r = await fetch(BASE + p, opt);
-  return r.json();
+async function refresh(){
+  const[c,a]=await Promise.all([api('/config'),api('/accounts')]);
+  CFG=c.cfg;TKS=(a.tokens||[]);renderAll();
+}
+function authed(a){return !!(a.token||a.siteCookie)}
+function siteOf(k){return(CFG?.sites||[]).find(s=>s.key===k)}
+function sumOfSite(s){let t=0;for(const a of s.accounts||[]){const e=document.querySelector(`[data-q="${a.key}"]`);if(e&&e.dataset.usd)t+=+e.dataset.usd;}return t}
+async function loadStatus(key,force){
+  const r=await api('/status/'+key+(force?'?force=1':''));
+  if(!r.ok){toast(r.detail||'额度获取失败');return r;}
+  document.querySelectorAll(`[data-q="${key}"]`).forEach(e=>{e.textContent='$'+USD(r.availableUSD);e.dataset.usd=r.availableUSD;});
+  document.querySelectorAll(`[data-tu="${key}"]`).forEach(e=>e.textContent=r.todayUsed!=null?'今日消耗 $'+USD(r.todayUsed):'今日消耗 -');
+  document.querySelectorAll(`[data-uu="${key}"]`).forEach(e=>e.textContent='累计已用 $'+USD(r.usedUSD));
+  updateTotal();return r;
+}
+function updateTotal(){
+  let t=0;TKS.forEach(x=>{const e=document.querySelector(`[data-q="${x.key}"]`);if(e&&e.dataset.usd)t+=+e.dataset.usd;});
+  $('#m-totalV').textContent='$'+USD(t);$('#dsk-total').textContent='$'+USD(t);
 }
 
-async function refresh() {
-  CFG = await api('/config');
-  TKS = (await api('/accounts')).tokens || [];
-  const cfg = CFG.cfg;
-  $('#proxyBadge').textContent = '代理: ' + (cfg.proxy.enabled ? `${cfg.proxy.type}://${cfg.proxy.host}:${cfg.proxy.port}` : '关');
-  $('#schBadge').textContent = '调度: ' + (cfg.schedule.enabled ? '每天 ' + (cfg.schedule.time || '?') : '关');
-  $('#sumAc').textContent = TKS.length;
-  $('#sumSite').textContent = cfg.sites.length;
-  $('#sumLogin').textContent = TKS.filter(t => t.token || t.siteCookie).length;
-
-  // 站点下拉
-  $('#aSite').innerHTML = cfg.sites.map(s => `<option value="${s.key}">${s.name} (${s.checkinType})</option>`).join('');
-  $('#logAc').innerHTML = '<option value="">— 选择账号 —</option>' + TKS.map(t => `<option value="${t.key}">${t.alias || t.key} @ ${t.siteName} (${t.githubAccount || '-'})</option>`).join('');
-  // 站点卡片(原版结构)
-  $('#siteGrid').innerHTML = cfg.sites.map(s => {
-    const mode = s.checkinType === 'login' ? '登录即发额度·每日重登领取' : '需单独签到·全自动';
-    return `<div class="card"><div class="lbl">${s.name}</div><div class="val" style="font-size:15px">${mode}</div><div class="lbl">${s.baseUrl}</div></div>`;
+/* ============ 渲染 ============ */
+function renderAll(){
+  const sites=CFG?.sites||[],n=TKS.length,ok=TKS.filter(authed).length;
+  const sum=`${sites.length}站 ${n}号 · ${ok}已签 ${n-ok}待签`;
+  $('#m-summary').textContent=sum;$('#dsk-summary').textContent=sum;
+  renderMob();renderDsk();updateTotal();
+}
+function rewardPill(a){return a.lastCheckin?.reward?`<span class="pill g">⚡ +$${USD(a.lastCheckin.reward)} 今日签到</span>`:''}
+function accOps(a,s){
+  const k=a.key,lg=s?.checkinType==='login',au=authed(a);
+  const act=!au?`<button class="btn r sm" onclick="openAuthFlow('${k}')">去授权</button>`
+    :lg?`<span class="pill g">✓ 已授权</span>`
+    :`<button class="btn b sm" onclick="doCheckin('${k}')">签到</button>`;
+  return act;
+}
+function accRowMob(s,a){
+  const k=a.key,au=authed(a),gh=a.githubAccount?'@'+a.githubAccount:'';
+  return `<div class="acc-box">
+    <div class="acc-r1"><div class="acc-ident">${esc(a.alias||k)}${gh?`<span class="gh">${esc(gh)}</span>`:''}<span class="acc-log" onclick="openLogs('${k}')">日志 ›</span></div>
+    <div style="display:flex;align-items:center;gap:6px">${au?'':`<span class="pill o">待授权</span>`}${accOps(a,s)}
+      <span style="color:var(--sub2);cursor:pointer;font-weight:900;padding:2px 6px" onclick="accMenu('${k}')">⋯</span></div></div>
+    <div class="acc-r2"><span class="bl">可用余额</span><span class="bal" data-q="${k}">-</span>${rewardPill(a)}</div>
+    <div class="acc-r3"><span data-tu="${k}">今日消耗 -</span><span style="flex:1"></span><span data-uu="${k}">累计已用 -</span>
+      <span class="lnk" onclick="loadStatus('${k}',true)">获取 ›</span></div></div>`;
+}
+function mShow(p){
+  mPage=p;
+  $('#m-board').style.display=p===0?'':'none';
+  $('#m-settings').style.display=p===1?'':'none';
+  $('#m-tab0').classList.toggle('on',p===0);$('#m-tab1').classList.toggle('on',p===1);
+  if(p===1)renderMSettings();else renderMob();
+}
+function renderMob(){
+  if(mPage===1){renderMSettings();return;}
+  const sites=CFG?.sites||[],box=$('#m-board');
+  if(!sites.length){box.innerHTML=`<div class="empty"><div style="font-size:46px;color:#d1d5db">▦</div><div class="e1">暂无配置站点</div><div class="e2">前往「设置 → 站点管理」添加公益中转站</div><div class="go" onclick="mShow(1)">去添加站点</div></div>`;return;}
+  box.innerHTML=sites.map(s=>{
+    const accs=s.accounts||[];
+    return `<div class="site-card"><div class="site-head">
+      <div><div class="site-name" onclick="window.open('${esc(s.affUrl||s.baseUrl)}','_blank')">${esc(s.name)} <span style="font-size:11px;opacity:.6">›</span></div>
+      <div class="site-meta">${esc((s.baseUrl||'').replace(/^https?:\/\//,''))} · ${s.checkinType==='login'?'登录即发额度·每日重登':'需单独签到·全自动'}</div></div>
+      <div style="color:var(--sub2);cursor:pointer;font-weight:900;padding:2px 6px" onclick="openSiteMenu('${s.key}')">⋯</div></div>
+      ${accs.length?accs.map(a=>accRowMob(s,a)).join(''):`<div class="hint" style="margin:4px 2px 10px">暂无账号 · <span style="color:var(--blue);cursor:pointer" onclick="openAddAccount('${s.key}')">添加账号</span></div>`}
+      </div>`;
   }).join('');
-  // 矩阵 + 额度(原版结构)
-  const rows = []; const quota = [];
-  for (const t of TKS) {
-    const site = cfg.sites.find(s => s.key === t.siteKey);
-    const login = !!(t.token || t.siteCookie);
-    const name = t.alias || t.key;
-    rows.push(`<div class="row"><span>${name}</span><span class="lbl" style="flex:1">${site?.name||t.siteKey} · ${t.githubAccount||'-'}</span>
-      <span class="chip ${login?'a':'c'}">${login?'已登录':'未授权'}</span>
-      <span class="chip ${t.encCredential?'a':'b'}">${t.encCredential?'凭据库✓全自动':'手动模式'}</span>
-      <button class="btn sm" data-a="${t.key}">查看额度</button>
-      <button class="btn sm" data-f="${t.key}">刷新余额</button>
-      <button class="btn sm" data-c="${t.key}">签到</button>
-      <button class="btn sm" data-l="${t.key}">查看日志</button>
-      <button class="btn sm danger" data-d="${t.key}">删除</button></div>`);
-    quota.push(`<div class="card" data-a="${t.key}"><div class="lbl">${name} · ${site?.name||''}</div><div class="lbl">可用额度</div><div class="val" id="q_${t.key}_rem">-</div><div class="lbl">已用额度</div><div class="val warn" id="q_${t.key}_used">-</div><div class="lbl">今日消耗</div><div class="val ok" id="q_${t.key}_bonus">-</div></div>`);
-  }
-  $('#matrix').innerHTML = rows.join('') || '<div class="row">还没有账号</div>';
-  $('#matrix2').innerHTML = rows.join('') || '<div class="row">还没有账号</div>';
-  $('#quotaGrid').innerHTML = quota.join('');
-  // 事件
-  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => fetchStatus(b.dataset.a));
-  document.querySelectorAll('[data-l]').forEach(b => b.onclick = () => showLogs(b.dataset.l, '系统'));
-  document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { toast('刷新中…'); fetchStatus(b.dataset.f, true); });
-  document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => doCheckin(b.dataset.c));
-  document.querySelectorAll('[data-d]').forEach(b => b.onclick = () => delAccount(b.dataset.d));
-  // 设置表单(原版字段)
-  $('#sHost').value = cfg.proxy.host; $('#sPort').value = cfg.proxy.port;
-  $('#sCron').value = cfg.schedule.time || '09:05';
-  $('#sSchOn').checked = !!cfg.schedule.enabled;
 }
-
-async function fetchStatus(key, force) {
-  const r = await api('/status/' + key + (force ? '?force=1' : ''));
-  if (!r.ok) { toast('接口失败: ' + (r.detail || r.error || '')); return; }
-  const el1 = $('#q_' + key + '_rem'), el2 = $('#q_' + key + '_used'), el3 = $('#q_' + key + '_bonus');
-  if (!r.authorized) {
-    if (el1) el1.textContent = '未授权';
-    if (el2) el2.textContent = '-';
-    if (el3) el3.textContent = '-';
-    return;
-  }
-  if (el1) el1.textContent = '$' + r.availableUSD;
-  if (el2) el2.textContent = '$' + r.usedUSD;
-  if (el3) el3.textContent = r.todayUsed != null ? '今日 $' + r.todayUsed : '-';
-  toast('✔ ' + key + (r.user ? ' @ ' + r.user : '') + '：可用 $' + r.availableUSD + ' / 已用 $' + r.usedUSD);
+function renderMSettings(){
+  const sites=CFG?.sites||[];
+  $('#m-settings').innerHTML=`
+  <div class="msetcard"><h3>站点管理</h3>
+    ${sites.map(s=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line-soft);font-size:13px">
+      <span style="color:var(--blue);font-weight:700;cursor:pointer" onclick="openEditSite('${s.key}')">${esc(s.name)}</span>
+      <span class="hint">${(s.accounts||[]).length}号 · ${s.checkinType}</span><span style="flex:1"></span>
+      <span style="color:var(--sub2);cursor:pointer" onclick="openSiteMenu('${s.key}')">⋯</span></div>`).join('')||'<div class="hint" style="padding:6px 0">暂无站点</div>'}
+    <div style="display:flex;gap:8px;margin-top:8px"><button class="btn lb sm" onclick="openAddSite()">＋ 添加站点</button>
+    <button class="btn lb sm" onclick="post('/setup').then(()=>{toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
+  <div class="msetcard"><h3>账号</h3>
+    ${TKS.map(a=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line-soft);font-size:13px">
+      <span style="font-weight:700">${esc(a.alias||a.key)}</span><span class="hint">${esc(siteOf(a.siteKey)?.name||a.siteKey)}</span>
+      <span style="flex:1"></span>${authed(a)?'<span class="pill g">已授权</span>':'<span class="pill o">待授权</span>'}
+      <span style="color:var(--sub2);cursor:pointer" onclick="accMenu('${a.key}')">⋯</span></div>`).join('')||'<div class="hint">暂无账号</div>'}
+    <div style="margin-top:8px"><button class="btn lb sm w100" onclick="openAddAccPick()">＋ 添加账号</button></div></div>
+  <div class="msetcard"><h3>引擎</h3>
+    <div style="display:flex;align-items:center;padding:8px 0;font-size:13px"><span>⏰ 定时调度</span><span style="flex:1"></span><span class="hint">${CFG?.schedule?.enabled?'每天 '+CFG.schedule.time:'未启用'}</span><button class="btn lb sm" style="margin-left:8px" onclick="openSched()">设置</button></div>
+    <div style="display:flex;align-items:center;padding:8px 0;font-size:13px;border-top:1px solid var(--line-soft)"><span>🛡 SOCKS5 代理</span><span style="flex:1"></span><span class="hint">${CFG?.proxy?.enabled?CFG.proxy.host+':'+CFG.proxy.port:'关闭'}</span><button class="btn lb sm" style="margin-left:8px" onclick="openProxy()">设置</button></div>
+    <div style="display:flex;align-items:center;padding:8px 0;font-size:13px;border-top:1px solid var(--line-soft)"><span>🔑 授权方式说明</span><span style="flex:1"></span><button class="btn lb sm" onclick="openAuthDoc()">查看</button></div></div>`;
 }
-
-async function doCheckin(key) {
-  toast('签到已触发(两级人机验证全自动,失败即报错)…');
-  const r = await api('/checkin/' + key, { method:'POST' });
-  toast(r.message || JSON.stringify(r));
-  fetchStatus(key); refresh();
+function renderDsk(){
+  const body=$('#dsk-body');
+  $('#dsk-title').textContent={board:'看板',accounts:'账号管理',sites:'站点管理',logs:'日志',settings:'设置'}[dPage];
+  if(dPage==='board')dskBoard();else if(dPage==='accounts')dskAccounts();else if(dPage==='sites')dskSites();else if(dPage==='logs')dskLogs();else dskSettings();
 }
-
-async function delAccount(key) {
-  if (!confirm('删除账号 ' + key + '?')) return;
-  await api('/accounts/' + key, { method:'DELETE' });
-  toast('已删除'); refresh();
+function dskBoard(){
+  const sites=CFG?.sites||[];
+  let cards=`<div class="dcards"><div class="dcard"><div class="lbl">站点</div><div class="val">${sites.length}</div></div>
+  <div class="dcard"><div class="lbl">账号</div><div class="val">${TKS.length}</div></div>
+  <div class="dcard"><div class="lbl">已授权</div><div class="val g">${TKS.filter(authed).length}</div></div>
+  <div class="dcard"><div class="lbl">总资产(已取)</div><div class="val g">$0.00</div></div></div>`;
+  if(!sites.length){$('#dsk-body').innerHTML=cards+'<div class="panel"><div class="empty"><div class="e1">暂无配置站点</div><div class="e2">从「站点」页载入内置四站或手动添加</div></div></div>';return;}
+  const rows=TKS.map(a=>{
+    const s=siteOf(a.siteKey);
+    return `<tr><td><b>${esc(a.alias||a.key)}</b><div style="font-size:11px;color:var(--sub2)">${esc(s?.name||a.siteKey)}</div></td>
+    <td>${a.githubAccount?esc(a.githubAccount):'<span style="color:var(--sub2)">-</span>'}</td>
+    <td>${authed(a)?'<span class="pill g">已授权</span>':'<span class="pill o">待授权</span>'}</td>
+    <td style="color:var(--green);font-weight:700" data-q="${a.key}">-</td>
+    <td data-tu="${a.key}">-</td><td data-uu="${a.key}">-</td>
+    <td>${rewardPill(a)||''}</td>
+    <td style="white-space:nowrap">${s?.checkinType==='login'?'':(authed(a)?`<button class="btn b sm" onclick="doCheckin('${a.key}')">签到</button>`:'')}
+      <button class="btn lb sm" onclick="loadStatus('${a.key}',true)">刷新</button>
+      <button class="btn lb sm" onclick="openLogs('${a.key}')">日志</button>
+      <button class="btn lb sm" onclick="accMenu('${a.key}')">⋯</button></td></tr>`;
+  }).join('');
+  $('#dsk-body').innerHTML=cards+`<div class="panel"><h3>账号额度总览</h3><table class="tbl"><thead><tr><th>账号</th><th>GitHub</th><th>状态</th><th>可用($)</th><th>今日消耗</th><th>累计已用</th><th>签到奖励</th><th>操作</th></tr></thead>
+  <tbody>${rows||'<tr><td colspan="8" class="hint">暂无账号</td></tr>'}</tbody></table></div>`;
+  updateTotal();
 }
-
-async function showLogs(key, cat) {
-  const r = await api('/logs/' + key + '?category=' + cat + '&limit=50');
-  const box = $('#logBox');
-  if (!r.ok) { box.innerHTML = '失败: ' + (r.error || r.detail || ''); return; }
-  const rows = r.rows || [];
-  let html = rows.map(x => `<div><span class="t">[${x.time || ''}]</span> <span class="e">[${x.category}]</span> ${esc(x.text || '')}${x.quota ? ' <b>+$' + (x.quota / 500000).toFixed(4) + '</b>' : ''}</div>`).join('');
-  if (r.lastBonus) html = `<div style="color:#6bdf85">🎁 最近签到奖励：[${r.lastBonus.time}] ${esc(r.lastBonus.text || '')}</div><hr style="border:none;border-top:1px solid #252a45;margin:8px 0">` + html;
-  box.innerHTML = html || '无记录';
+function dskAccounts(){
+  const sites=CFG?.sites||[];
+  $('#dsk-body').innerHTML=`<div class="panel"><h3>添加账号</h3><div class="fmt">
+    <select id="na_site">${sites.map(s=>`<option value="${s.key}">${esc(s.name)} (${s.checkinType})</option>`).join('')}</select>
+    <input type="text" id="na_alias" placeholder="别名 gh1"><input type="text" id="na_gh" placeholder="GitHub 用户名(可选)">
+    <button class="btn b" onclick="addAccount()">保存</button></div>
+    <div class="hint">保存后点账号「⋯ → 全自动授权」一键完成;或「手动登录授权」弹浏览器自己登录(不存密码)。</div></div>
+  <div class="panel"><h3>账号列表</h3><table class="tbl"><thead><tr><th>账号</th><th>站点</th><th>GitHub</th><th>状态</th><th>凭据库</th><th>操作</th></tr></thead><tbody>
+  ${TKS.map(a=>{const s=siteOf(a.siteKey);return `<tr><td><b>${esc(a.alias||a.key)}</b></td><td>${esc(s?.name||a.siteKey)}</td>
+    <td>${a.githubAccount?esc(a.githubAccount):'-'}</td>
+    <td>${authed(a)?'<span class="pill g">已授权</span>':'<span class="pill o">待授权</span>'}</td>
+    <td>${a.encCredential?'<span class="pill b">✓ 全自动</span>':'<span class="pill s">手动模式</span>'}</td>
+    <td style="white-space:nowrap"><button class="btn b sm" onclick="openAuthFlow('${a.key}')">全自动授权</button>
+    <button class="btn lb sm" onclick="manualAuth('${a.key}')">手动登录</button>
+    <button class="btn lb sm" onclick="openLogs('${a.key}')">日志</button>
+    <button class="btn r sm" onclick="delAccount('${a.key}')">删除</button></td></tr>`}).join('')||'<tr><td colspan="6" class="hint">暂无账号</td></tr>'}
+  </tbody></table></div>`;
 }
-
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function toast(m){const d=document.createElement('div');d.textContent=m;d.style.cssText='position:fixed;top:18px;right:18px;background:#1f2550;border:1px solid #252a45;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px;z-index:999';document.body.appendChild(d);setTimeout(()=>d.remove(),4000)}
-
-/* ---------- 授权(Python 引擎:任务轮询,替代原版 Android/Electron 桥) ---------- */
-async function startAuth(mode) {
-  const siteKey = $('#aSite').value, gh = $('#aGh').value.trim();
-  let accountKey = $('#aKey').value.trim();
-  // 别名未存过则先创建账号
-  const exists = TKS.find(t => (t.alias || t.key) === accountKey);
-  if (!exists && accountKey) {
-    await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ siteKey, alias: accountKey, githubAccount: gh || undefined }) });
-  } else if (exists) accountKey = exists.key;
-  if (!accountKey) { toast('先填账号别名（如 gh1）'); return; }
-
-  if (gh) await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ key: accountKey, siteKey, githubAccount: gh }) });
-
-  const stat = $('#authStat'); stat.classList.remove('hidden');
-  if (mode === 'auto') {
-    const pw = prompt('GitHub 密码(存入加密凭据库,读不回显):');
-    if (!pw) return;
-    const totp = prompt('TOTP 密钥(2FA setup key,没有点取消):') || '';
-    await api('/credentials/' + accountKey, { method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ username: gh || undefined, password: pw, totpSecret: totp || undefined }) });
-  }
-  const ep = mode === 'auto' ? '/oauth/start' : '/oauth/manual';
-  const t = await api(ep, { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ accountKey }) });
-  if (!t.task) { toast('发起失败: ' + (t.detail || '')); return; }
-  toast(mode === 'auto' ? 'headless 全自动授权中…' : '浏览器已弹出,请手动登录(密码不存储)');
-  const tick = async () => {
-    const s = await api('/oauth/status?task=' + t.task);
-    if (s.state === 'running') {
-      stat.innerHTML = '⏳ ' + esc(s.message || '进行中…');
-      setTimeout(tick, 3000);
-    } else {
-      stat.innerHTML = (s.state === 'ok' ? '✅ ' : '❌ ') + esc(s.message || s.state) + (s.login ? ' <b>@' + esc(s.login) + '</b>' : '');
-      toast(s.state === 'ok' ? '✅ 授权成功: ' + (s.login || '') : '授权未完成: ' + (s.message || ''));
-      refresh();
-    }
-  };
-  tick();
+function dskSites(){
+  const sites=CFG?.sites||[];
+  $('#dsk-body').innerHTML=`<div class="panel"><h3>添加站点</h3><div class="fmt">
+    <input type="text" id="ns_name" placeholder="名称"><input type="text" id="ns_url" placeholder="https://…" style="min-width:230px">
+    <select id="ns_type"><option value="newapi">newapi(有签到接口,全自动)</option><option value="login">login(登录即发额度,每日重登)</option></select>
+    <button class="btn b" onclick="addSiteDsk()">添加</button>
+    <button class="btn lb" onclick="post('/setup').then(()=>{toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
+  <div class="dsk2col">${sites.map(s=>`<div class="grp"><div class="grp-h"><span style="color:var(--blue);font-size:14px;font-weight:800">${esc(s.name)}</span> <span class="pill ${s.checkinType==='login'?'o':'b'}" style="margin-left:6px">${s.checkinType}</span></div>
+    <div class="git"><span class="desc">${esc(s.baseUrl)}</span><span style="flex:1"></span>${s.affUrl?`<a href="${esc(s.affUrl)}" target="_blank" style="color:var(--blue);font-size:11px">邀请注册</a>`:''}</div>
+    <div class="git"><span class="desc">账号 ${(s.accounts||[]).length} 个 · 本站资产 $${USD(sumOfSite(s))}</span><span style="flex:1"></span>
+      <span style="color:var(--blue);font-size:12px;cursor:pointer" onclick="openEditSite('${s.key}')">编辑</span>
+      <span style="color:var(--red);font-size:12px;cursor:pointer;margin-left:10px" onclick="confirmDlg('删除站点','删除该站点及其全部账号?',async()=>{await api('/sites/${s.key}',{method:'DELETE'});toast('已删除');refresh();})">删除</span></div></div>`).join('')}</div>`;
 }
-$('#btnAuth').onclick = () => startAuth('auto');
-$('#btnAuthManual').onclick = () => startAuth('manual');
+function dskLogs(){
+  $('#dsk-body').innerHTML=`<div class="panel"><h3>日志查询</h3><div class="fmt">
+    <select id="lg_ac" style="min-width:200px"><option value="">— 选择账号 —</option>${TKS.map(a=>`<option value="${a.key}">${esc(a.alias||a.key)} @ ${esc(siteOf(a.siteKey)?.name||a.siteKey)}</option>`).join('')}</select>
+    <button class="btn b" onclick="const k=$('#lg_ac').value;if(!k)toast('先选账号');else openLogs(k)">使用日志</button>
+    <button class="btn lb" onclick="logLocal()">本地运行日志</button></div>
+  <div class="logbox" id="dsk-logbox">选择账号查看站点使用日志(消费记录/签到奖励),或查看本地运行日志。</div></div>`;
+}
+function dskSettings(){
+  const sites=CFG?.sites||[];
+  $('#dsk-body').innerHTML=`<div class="dsk2col">
+  <div class="grp"><div class="grp-h">引擎设置</div>
+    <div class="git" onclick="openSched()"><span>⏰</span><div><div>定时调度</div><div class="desc">${CFG?.schedule?.enabled?'每天 '+CFG.schedule.time+' 自动签到':'未启用'}</div></div><span style="flex:1"></span><span style="color:var(--blue)">›</span></div>
+    <div class="git" onclick="openProxy()"><span>🛡</span><div><div>SOCKS5 代理</div><div class="desc">${CFG?.proxy?.enabled?CFG.proxy.host+':'+CFG.proxy.port:'关闭'}</div></div><span style="flex:1"></span><span style="color:var(--blue)">›</span></div>
+    <div class="git" onclick="openAuthDoc()"><span>🔑</span><div><div>授权方式说明</div><div class="desc">全自动(headless) / 手动登录(不存密码)</div></div><span style="flex:1"></span><span style="color:var(--blue)">›</span></div>
+  </div>
+  <div class="grp"><div class="grp-h">站点快捷</div>
+    ${sites.map(s=>`<div class="git" onclick="openEditSite('${s.key}')"><span style="color:var(--blue);font-weight:700">${esc(s.name)}</span><div class="desc">${(s.accounts||[]).length} 号 · 资产 $${USD(sumOfSite(s))}</div><span style="flex:1"></span><span style="color:var(--blue)">›</span></div>`).join('')||'<div class="git"><span class="desc">暂无站点</span></div>'}
+  </div></div>`;
+}
+function dskNav(p){dPage=p;document.querySelectorAll('#dsk .dnav').forEach(n=>n.classList.toggle('on',n.dataset.p===p));renderDsk();}
+document.querySelectorAll('#dsk .dnav').forEach(n=>n.onclick=()=>dskNav(n.dataset.p));
 
-/* ---------- 表单(原版行为) ---------- */
-$('#addForm').onsubmit = async e => {
-  e.preventDefault();
-  const t = { siteKey: $('#aSite').value, alias: $('#aKey').value.trim(), githubAccount: $('#aGh').value.trim() || undefined, token: $('#aToken').value.trim() || undefined };
-  if (!t.alias) { toast('账号别名必填'); return; }
-  await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(t) });
-  toast('已保存'); $('#aToken').value = ''; refresh();
-};
-$('#siteForm').onsubmit = async e => {
-  e.preventDefault();
-  const r = await api('/sites/save', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ name: $('#sName').value, baseUrl: $('#sUrl').value, checkinType: $('#sType').value }) });
-  if (r.ok) { toast('站点已添加'); $('#sName').value = ''; $('#sUrl').value = ''; refresh(); }
-  else toast(r.detail || r.error);
-};
-$('#btnSetup').onclick = async () => { await api('/setup', { method:'POST' }); toast('内置四站已载入'); refresh(); };
-$('#setForm').onsubmit = async e => {
-  e.preventDefault();
-  await api('/settings/save', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ proxy: { enabled: CFG.cfg.proxy.enabled, host: $('#sHost').value, port: +$('#sPort').value },
-                           schedule: { enabled: $('#sSchOn').checked, time: $('#sCron').value } }) });
-  toast('已保存(即时生效)'); refresh();
-};
-$('#btnRunNow').onclick = async () => {
-  const r = await api('/run-all', { method:'POST' });
-  toast(r.message || '已触发,看运行日志');
-};
-$('#btnLogs').onclick = () => { const k=$('#logAc').value; if(!k) toast('先选账号'); else showLogs(k, '系统'); };
-$('#btnHist').onclick = async () => { const r=await api('/history'); $('#logBox').innerHTML = (r.data||[]).map(x=>`<div><span class="t">[${x.time}]</span> <span class="e">[${x.site||'-'}]${x.account||''} ${x.event||''}</span> ${(x.detail?JSON.stringify(x.detail):'')}</div>`).join(''); };
-
-document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
-  t.classList.add('on');
-  document.querySelectorAll('[id^="tab-"]').forEach(b=>b.classList.add('hidden'));
-  $('#tab-' + t.dataset.tab).classList.remove('hidden');
-  $('#title').textContent = t.textContent.trim();
-});
-
-$('#btnRefreshAll').onclick = async () => {
-  toast('全部余额刷新中(绕过缓存)…');
-  for (const t of TKS) if (t.token || t.siteCookie) await fetchStatus(t.key, true);
-  toast('✅ 刷新完成');
-};
+/* ============ 操作 ============ */
+async function doCheckin(k){busy(true,'签到中(两级人机验证全自动)…');const r=await post('/checkin/'+k);busy(false);toast(r.message||JSON.stringify(r));refresh();}
+async function bulkCheckin(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键签到全部…');let n=0;for(const t of ts){const r=await post('/checkin/'+t.key);if(r.ok||r.state==='already')n++;}busy(false);toast(`一键签到 ${n}/${ts.length} 成功`);refresh();}
+async function bulkRefresh(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键刷新额度…');for(const t of ts)await loadStatus(t.key,true);busy(false);toast('✅ 刷新完成');}
+async function delAccount(k){confirmDlg('删除账号','确认删除该账号?',async()=>{await api('/accounts/'+k,{method:'DELETE'});toast('已删除');refresh();});}
+function accMenu(k){openSheet('账号操作',`<div class="menu-item" onclick="closeSheet();openAuthFlow('${k}')"><span>🔑</span>全自动授权(headless)</div>
+  <div class="menu-item" onclick="closeSheet();manualAuth('${k}')"><span>🖥️</span>手动登录授权(弹浏览器,不存密码)</div>
+  <div class="menu-item" onclick="closeSheet();openLogs('${k}')"><span>📜</span>查看日志</div>
+  <div class="menu-item red" onclick="closeSheet();delAccount('${k}')"><span>🗑</span>删除账号</div>`);}
+function openSiteMenu(k){openSheet('站点操作',`<div class="menu-item" onclick="closeSheet();openEditSite('${k}')"><span>✎</span>编辑站点</div>
+  <div class="menu-item" onclick="closeSheet();openAddAccount('${k}')"><span>＋</span>添加账号</div>
+  <div class="menu-item red" onclick="closeSheet();confirmDlg('删除站点','确认删除该站点及其账号?',async()=>{await api('/sites/${k}',{method:'DELETE'});toast('已删除');refresh();})"><span>🗑</span>删除站点</div>`);}
+async function addAccount(){const siteKey=$('#na_site').value,alias=$('#na_alias').value.trim(),gh=$('#na_gh').value.trim();if(!alias){toast('填别名');return;}const r=await post('/accounts/save',{siteKey,alias,githubAccount:gh||undefined});toast(r.ok?'已保存':'失败');if(r.ok)refresh();}
+async function addSiteDsk(){const r=await post('/sites/save',{name:$('#ns_name').value,baseUrl:$('#ns_url').value,checkinType:$('#ns_type').value});toast(r.ok?'已添加':(r.detail||r.error));if(r.ok)refresh();}
+function openAddAccPick(){openSheet('添加账号',`<div class="fld"><label>站点</label><select id="aa_site">${(CFG?.sites||[]).map(s=>`<option value="${s.key}">${esc(s.name)}</option>`).join('')}</select></div>
+  <div class="fld"><label>别名</label><input id="aa_alias" placeholder="gh1"></div>
+  <div class="fld"><label>GitHub 用户名(可选)</label><input id="aa_gh"></div>
+  <button class="btn b w100" onclick="saveAddAcc()">保存</button>`);}
+function openAddAccount(siteKey){openSheet('添加账号',`<div class="fld"><label>别名</label><input id="aa_alias" placeholder="gh1"></div>
+  <div class="fld"><label>GitHub 用户名(可选)</label><input id="aa_gh"></div>
+  <button class="btn b w100" onclick="saveAddAcc('${siteKey}')">保存</button>`);}
+async function saveAddAcc(siteKey){const k=siteKey||$('#aa_site').value;const r=await post('/accounts/save',{siteKey:k,alias:$('#aa_alias').value.trim(),githubAccount:$('#aa_gh').value.trim()||undefined});toast(r.ok?'已保存':'失败');if(r.ok){closeSheet();refresh();}}
+function openAuthFlow(k){
+  const cur=TKS.find(t=>t.key===k);
+  openSheet('全自动授权',`<div class="hint" style="margin-bottom:10px">GitHub 密码与 TOTP 写入加密凭据库(AES-256-GCM,读不回显)。授权后签到/续期全自动。</div>
+  <div class="fld"><label>GitHub 账号(留空用 ${esc(cur?.githubAccount||'已有')})</label><input id="af_gh" value="${esc(cur?.githubAccount||'')}"></div>
+  <div class="fld"><label>GitHub 密码</label><input id="af_pw" type="password"></div>
+  <div class="fld"><label>TOTP 密钥(2FA setup key,无则留空)</label><input id="af_tp"></div>
+  <button class="btn b w100" onclick="startAuto('${k}')">保存凭据并授权</button>`);
+}
+async function startAuto(k){const gh=$('#af_gh').value.trim(),pw=$('#af_pw').value,tp=$('#af_tp').value.trim();if(!pw){toast('需要密码');return;}
+  await post('/credentials/'+k,{username:gh||undefined,password:pw,totpSecret:tp||undefined});
+  if(gh)await post('/accounts/save',{key:k,githubAccount:gh});
+  closeSheet();startOAuth(k,'auto');}
+async function manualAuth(k){openSheet('手动登录授权',`<div class="hint">将弹出浏览器窗口:自己输入 GitHub 密码/2FA 并授权。<b>不保存密码</b>,仅登录态存本服务器,之后签到/续期全自动。</div>
+  <button class="btn b w100" onclick="closeSheet();startOAuth('${k}','manual')">弹出浏览器登录</button>`);}
+async function startOAuth(k,mode){busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
+  const t=await post(mode==='auto'?'/oauth/start':'/oauth/manual',{accountKey:k});
+  if(!t.task){busy(false);toast(t.detail||'发起失败');return;}
+  const tick=async()=>{const s=await api('/oauth/status?task='+t.task);
+    if(s.state==='running'){busy(true,s.message||'授权中…');setTimeout(tick,3000);}
+    else{busy(false);toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+s.message);refresh();}};
+  tick();}
+function openLogs(k){openSheet('账号日志',`<div class="fmt" style="margin-bottom:8px"><button class="btn b sm" onclick="logTab('${k}','site')">使用日志</button><button class="btn lb sm" onclick="logTab('${k}','local')">本地运行日志</button></div><div class="logbox" id="logBody">加载中…</div>`);logTab(k,'site');}
+async function logTab(k,kind){const box=$('#logBody');if(!box)return;box.textContent='加载中…';
+  if(kind==='local'){const r=await api('/history');box.textContent=(r.data||[]).slice(0,80).map(l=>`[${(l.time||'').slice(11,19)}] [${l.site||'-'}] ${l.account||''} ${l.event} ${JSON.stringify(l.detail||'')}`).join('\n');}
+  else{const r=await api('/logs/'+k+'?category=系统&limit=50');if(!r.ok){box.textContent=r.detail||'获取失败';return;}
+    const rows=r.rows||[];box.textContent=(r.lastBonus?`🎁 最近签到奖励: ${r.lastBonus.text}\n${'─'.repeat(24)}\n`:'')+rows.map(x=>`[${(x.time||'').slice(0,19)}] ${x.text}`).join('\n')||'无记录';}}
+async function logLocal(){const r=await api('/history');const box=$('#dsk-logbox');if(box)box.textContent=(r.data||[]).slice(0,120).map(l=>`[${(l.time||'').slice(0,19)}] [${l.site||'-'}] ${l.account||''} ${l.event} ${JSON.stringify(l.detail||'')}`).join('\n');}
+function openAddSite(){openSheet('添加站点',`<div class="fld"><label>名称</label><input id="s_name"></div><div class="fld"><label>API 地址</label><input id="s_url" placeholder="https://…"></div>
+  <div class="fld"><label>形态</label><select id="s_type"><option value="newapi">newapi(有签到接口,全自动)</option><option value="login">login(登录即发额度,每日重登)</option></select></div>
+  <button class="btn b w100" onclick="saveSite()">添加</button>`);}
+function openEditSite(k){const s=siteOf(k);if(!s)return;openSheet('编辑站点',`<div class="fld"><label>名称</label><input id="s_name" value="${esc(s.name)}"></div>
+  <div class="fld"><label>API 地址</label><input id="s_url" value="${esc(s.baseUrl)}"></div>
+  <div class="fld"><label>形态</label><select id="s_type"><option value="newapi" ${s.checkinType==='newapi'?'selected':''}>newapi</option><option value="login" ${s.checkinType==='login'?'selected':''}>login</option></select></div>
+  <button class="btn b w100" onclick="saveSite('${k}')">保存</button>`);}
+async function saveSite(k){const b={name:$('#s_name').value,baseUrl:$('#s_url').value,checkinType:$('#s_type').value};if(k)b.key=k;const r=await post('/sites/save',b);toast(r.ok?'已保存':(r.detail||r.error));if(r.ok){closeSheet();refresh();}}
+function openSched(){openSheet('定时调度',`<div class="fld"><label><input type="checkbox" id="sch_on" style="width:auto" ${CFG?.schedule?.enabled?'checked':''}> 启用每日自动签到</label></div>
+  <div class="fld"><label>时刻(Asia/Shanghai,届时自动跑全部账号)</label><input id="sch_time" type="time" value="${CFG?.schedule?.time||'09:05'}"></div>
+  <button class="btn b w100" onclick="saveSched()">保存(即时生效)</button>`);}
+async function saveSched(){const r=await post('/settings/save',{schedule:{enabled:$('#sch_on').checked,time:$('#sch_time').value}});toast(r.ok?'调度已保存':'失败');if(r.ok){closeSheet();refresh();}}
+function openProxy(){openSheet('SOCKS5 代理',`<div class="fld"><label><input type="checkbox" id="px_on" style="width:auto" ${CFG?.proxy?.enabled?'checked':''}> 启用代理</label></div>
+  <div class="fld row"><div><label>主机</label><input id="px_h" value="${CFG?.proxy?.host||'127.0.0.1'}"></div><div><label>端口</label><input id="px_p" type="number" value="${CFG?.proxy?.port||10808}"></div></div>
+  <button class="btn b w100" onclick="savePx()">保存</button>`);}
+async function savePx(){await post('/settings/save',{proxy:{enabled:$('#px_on').checked,host:$('#px_h').value,port:+$('#px_p').value}});toast('代理已保存');if(CFG)refresh();closeSheet();}
+function openAuthDoc(){openSheet('授权方式说明',`<div class="hint">· <b>全自动授权</b>:GitHub 密码/TOTP 存加密凭据库,headless 一键完成;签到/续期全自动。</div>
+  <div class="hint" style="margin-top:10px">· <b>手动登录授权</b>:弹可见浏览器自己登录(适合不愿交密码/2FA 的场景),只存登录会话。</div>
+  <div class="hint" style="margin-top:10px">· <b>额度</b>:走站点官方接口(§3.0 契约),不解析页面;按需获取,10 分钟缓存。</div>`);}
+function openAssetBreakdown(){
+  const sites=(CFG?.sites||[]).filter(s=>(s.accounts||[]).length);
+  openSheet('各站点资产',sites.map(s=>{let n=0;for(const a of s.accounts||[]){const e=document.querySelector(`[data-q="${a.key}"]`);if(e&&e.dataset.usd)n++;}const t=sumOfSite(s);
+    return `<div class="menu-item"><span style="font-weight:700;color:var(--blue)">${esc(s.name)}</span><div style="flex:1"></div><span class="hint">$${USD(t)} (${n} 号已取)</span></div>`}).join('')||'<div class="hint">暂无数据,先点「刷新」</div>');}
+function openSheet(t,h){$('#sheetTitle').textContent=t;$('#sheetBody').innerHTML=h;$('#overlay').classList.add('on')}
+function closeSheet(){$('#overlay').classList.remove('on')}
+$('#overlay').onclick=e=>{if(e.target.id==='overlay')closeSheet()};
+let dlgCb=()=>{};
+function confirmDlg(t,m,cb){$('#dlgT').textContent=t;$('#dlgM').textContent=m;dlgCb=cb;$('#dlg').classList.add('on')}
+$('#dlgNo').onclick=()=>$('#dlg').classList.remove('on');
+$('#dlgYes').onclick=()=>{$('#dlg').classList.remove('on');dlgCb()};
 
 refresh();
 </script>
