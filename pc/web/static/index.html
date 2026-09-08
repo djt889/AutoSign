@@ -269,21 +269,16 @@ function renderSettings(){
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <button class="btn lb sm" onclick="addSiteSheet()">＋ 添加站点</button>
       <button class="btn lb sm" onclick="post('/setup').then(()=>{toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
-  <div class="msetcard"><h3>账号 · 凭据库</h3>
-    ${TKS.map(a=>{const s=siteOf(a.siteKey);return `<div class="mset-it"><span class="nm">${esc(a.alias||a.key)}</span>
-      <span class="cur">@ ${esc(s?.name||a.siteKey)}${a.credentialName?` · 凭据「${esc(a.credentialName)}」`:''}</span><span class="sp"></span>
-      ${authed(a)?'<span class="pill g">已授权</span>':'<span class="pill o">待授权</span>'}
-      ${a.credentialName?'<span class="pill b">凭据✓</span>':(a.encCredential?'<span class="pill b">全自动</span>':'')}
-      <span style="color:var(--sub2);cursor:pointer" onclick="accMenu('${a.key}')">⋯</span></div>`}).join('')||'<div class="hint" style="padding:4px 0">暂无账号</div>'}
-    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-      <button class="btn b sm w100" onclick="addAccSheet()">＋ 为站点添加账号(从凭据库选)</button>
-      <button class="btn lb sm w100" onclick="credListSheet()">🔑 账号凭据库(录入 GitHub 账号)</button></div>
-    <div class="hint" style="margin-top:6px">同一 GitHub 账号凭据全局一条,可绑定多个站点;给新站点加账号不用重新录密码。</div></div>
+  <div class="msetcard"><h3>账号凭据库</h3>
+    <div class="hint" style="margin-bottom:6px">GitHub 账号凭据全局一条,可绑定多个站点。已录入 <b id="credCount">…</b> 条。</div>
+    <div class="hint" style="margin-bottom:6px">全自动:存密码/2FA,签到续期全自动；手动:授权时弹浏览器自己登录,不存密码。</div>
+    <button class="btn b sm w100" onclick="credListSheet()">🔑 管理账号凭据库</button></div>
   <div class="msetcard"><h3>引擎</h3>
     <div class="mset-it"><span class="nm">⏰ 定时调度</span><span class="sp"></span><span class="cur">${CFG?.schedule?.enabled?'每天 '+CFG.schedule.time:'未启用'}</span><button class="btn lb sm" onclick="schedSheet()">设置</button></div>
     <div class="mset-it"><span class="nm">🛡 SOCKS5 代理</span><span class="sp"></span><span class="cur">${CFG?.proxy?.enabled?CFG.proxy.host+':'+CFG.proxy.port:'关闭'}</span><button class="btn lb sm" onclick="proxySheet()">设置</button></div>
     <div class="mset-it"><span class="nm">🔑 授权方式说明</span><span class="sp"></span><button class="btn lb sm" onclick="authDoc()">查看</button></div>
     <div class="mset-it"><span class="nm">📜 本地运行日志</span><span class="sp"></span><button class="btn lb sm" onclick="openLocalLog()">查看</button></div></div>`;
+  api('/credentials').then(c=>{const e=$('#credCount');if(e)e.textContent=(c.credentials||[]).length;});
 }
 function showPage(p){
   page=p;
