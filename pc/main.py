@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .engine.checkin import run_checkin
 from .engine.site_client import QUOTA_PER_UNIT_DEFAULT, SiteClient
 from .service import config, db
 
@@ -95,6 +96,18 @@ def account_status(account_key: str):
     }
     db.append_log(site["key"], account_key, "status", {"availableUSD": result["availableUSD"]})
     return result
+
+
+@app.post("/api/checkin/{account_key}")
+def checkin(account_key: str):
+    """手动签到:两级 Turnstile 全自动,失败即报错(不转人工,契约 §7)。"""
+    cfg = config.load()
+    found = config.find_account(cfg, account_key)
+    if not found:
+        raise HTTPException(404, "账号不存在")
+    site, acc = found
+    report = run_checkin(site, acc, cfg)
+    return report.to_dict()
 
 
 @app.get("/api/history")

@@ -85,7 +85,7 @@
 
 - **newapi**:有 `GET/POST /api/user/checkin` → 全自动签到,可拿到确切奖励金额
 - **login**:登录即发额度(无签到接口)→ 刷新即取奖励并置已签
-- **web**:非 New API 或接口被拦截 → 点「去网页」人工处理
+- **web**:非 New API 或接口被拦截 → 标记「不支持自动签到」,不提供人工签到入口(本版定位:签到全自动,失败即报错,见 §7)
 
 ---
 
@@ -235,8 +235,12 @@ New API 系登录凭据是 OAuth 交换响应的 **`Set-Cookie` session**(gin �
 3. POST /api/user/checkin
    响应文本匹配 /turnstile|captcha|验证|校验|人机|challenge|robot/i ⇒ 被拦
    未被拦 ⇒ 成功,进入奖励三态
-4. 被拦 ⇒ 挂 Turnstile(官方 api.js?render=explicit + render(box,{sitekey,
-   appearance:'interaction-only'})) → 拿 token → POST /api/user/checkin?turnstile=<token>
+4. 被拦 ⇒ 两级自动处理,**全部失败即报错,不转人工**(签到 100% 自动化):
+   - 第一级:挂官方挂件(challenges.cloudflare.com/turnstile/v0/api.js?render=explicit
+     + render(box,{sitekey, appearance:'interaction-only'})) → 拿 token
+     → POST /api/user/checkin?turnstile=<token>
+   - 第二级:StealthyFetcher(solve_cloudflare=True) 整页求解后重试 POST
+   - 两级都过不去 ⇒ 记失败日志 + 报错(含拦截原因),等下一轮调度或用户换代理
 5. 奖励三态:
    - 有今日记录且 quota_awarded>0 → 显示 "+$28.07 今日签到"
    - 有今日记录但 quota_awarded==0 → 显示「本站无签到奖励」
@@ -533,7 +537,7 @@ android/ (改造后)
 | `src/auth.js` / `src/server.js` | 「不伪造」「不批量」注释 | 删除相关注释 |
 | 前端 UI 文案 | 任何「不绕过人机验证」字样 | 删除 |
 
-同时,**行为层放开**:将 Turnstile 处理从「仅 interaction-only 静默」升级为两级:POST 被拦时先挂官方挂件(interaction-only,无需交互静默过);仍过不去则用 StealthyFetcher 的 Cloudflare 求解能力(`solve_cloudflare=True`)自动过。签到 POST 不再因为「过不了验证」直接判失败。
+同时,**行为层放开**:将 Turnstile 处理从「仅 interaction-only 静默」升级为两级全自动:POST 被拦时先挂官方挂件(interaction-only,无需交互静默过);仍过不去则用 StealthyFetcher 的 Cloudflare 求解能力(`solve_cloudflare=True`)自动过。**两级都失败 ⇒ 明确报错记日志,不提供任何人工签到兜底**——本版定位是全自动化,签到不允许"转人工"路径;授权流程(§5)不受此限,其 B/C 人工兜底保留。
 
 ---
 
@@ -584,7 +588,7 @@ Scrapling 官方有 `pyd4vinci/scrapling` 镜像(预装全部浏览器),Dockerfi
 | 旧 `config.json` | Python 侧 deep-merge 默认值,站点→账号两级结构完全兼容;token 明文字段若已加密,迁移时先用旧密钥解密再落新库(或直接重新授权) |
 | 旧 `data/logs.json` | 直接读取,格式不变 |
 | 内置站点(4 个) | 保留在 `data/` 快照与 WebUI,注册邀请码链接保留 |
-| 三种站点形态 | 保留,`web` 形态在 WebUI 里变成「跳转到站点」按钮 |
+| 三种站点形态 | 保留;`web` 形态标记「不支持自动签到」(不提供人工签到入口,见 §7) |
 
 ---
 
@@ -594,7 +598,7 @@ Scrapling 官方有 `pyd4vinci/scrapling` 镜像(预装全部浏览器),Dockerfi
 |---|---|
 | GitHub OAuth 全部依赖浏览器自动化,故障面大 | 三级授权降级链:A headless 默认 → B 有头兜底 → C 手动永远可用;凭据库自动填充可关 |
 | headless 授权首次需填 GitHub 账密/2FA | 方式 A `page_action` 全自动填充(凭据库已存则无感);首次或凭据缺失时降级 B/C |
-| Scrapling StealthyFetcher 对某些站 Cloudflare 求解失败 | 降级到 DynamicFetcher 全浏览器交互;再不行走 `web` 形态人工 |
+| Scrapling StealthyFetcher 对某些站 Cloudflare 求解失败 | 记失败日志报错,等下轮调度或用户换代理重试;**不转人工签到**(全自动定位) |
 | Python 异步生态与 Scrapling 浏览器 fetcher 混用 | 浏览器操作放独立线程池(`asyncio.to_thread`),不阻塞 FastAPI 事件循环 |
 | 服务器在公网暴露 → 凭据泄露 | 默认只绑内网 IP;可选令牌鉴权;凭据 AES-256-GCM 静态加密;不部署到公网(文档明确本地服务器定位) |
 | 多账号并发点签到 → 429 | 保留同账号串行 + 成功后 8s 复用 + 失败 90s 冷却;ProxyRotator 换节点 |
