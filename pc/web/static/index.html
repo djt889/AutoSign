@@ -277,7 +277,10 @@ function renderSettings(){
     <div class="mset-it"><span class="nm">⏰ 定时调度</span><span class="sp"></span><span class="cur">${CFG?.schedule?.enabled?'每天 '+CFG.schedule.time:'未启用'}</span><button class="btn lb sm" onclick="schedSheet()">设置</button></div>
     <div class="mset-it"><span class="nm">🛡 SOCKS5 代理</span><span class="sp"></span><span class="cur">${CFG?.proxy?.enabled?CFG.proxy.host+':'+CFG.proxy.port:'关闭'}</span><button class="btn lb sm" onclick="proxySheet()">设置</button></div>
     <div class="mset-it"><span class="nm">🔑 授权方式说明</span><span class="sp"></span><button class="btn lb sm" onclick="authDoc()">查看</button></div>
-    <div class="mset-it"><span class="nm">📜 本地运行日志</span><span class="sp"></span><button class="btn lb sm" onclick="openLocalLog()">查看</button></div></div>`;
+    <div class="mset-it"><span class="nm">📜 本地运行日志</span><span class="sp"></span><button class="btn lb sm" onclick="openLocalLog()">查看</button></div>
+    <div class="mset-it"><span class="nm">📡 实时日志(SSE)</span><span class="sp"></span><button class="btn lb sm" onclick="openLiveLog()">打开</button></div>
+    <div class="mset-it"><span class="nm">▶ 立即跑一轮全部账号</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('立即执行','对所有已授权账号跑一轮签到?',async()=>{const r=await post('/run-all');toast(r.message||'已触发(后台执行,看实时日志)');})">执行</button></div>
+    <div class="mset-it"><span class="nm">💾 数据维护(存量加密)</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('一键加密','把存量明文 token/cookie 一次性加密(幂等)?',async()=>{const r=await post('/seal-existing');toast(r.ok?'已加密 '+r.sealed_accounts+' 个账号':'失败')})">一键加密</button></div></div>`;
   api('/credentials').then(c=>{const e=$('#credCount');if(e)e.textContent=(c.credentials||[]).length;});
 }
 function showPage(p){
@@ -297,8 +300,14 @@ async function bulkRefresh(){const ts=TKS.filter(authed);if(!ts.length){toast('�
 async function delAccount(k){confirmDlg('删除账号','确认删除该账号?',async()=>{await api('/accounts/'+k,{method:'DELETE'});toast('已删除');refresh();});}
 function accMenu(k){openSheet('账号操作',`<div class="menu-item" onclick="closeSheet();openAuth('${k}','auto')"><span class="ic">🔑</span>全自动授权(headless)</div>
   <div class="menu-item" onclick="closeSheet();openAuth('${k}','manual')"><span class="ic">🖥️</span>手动登录授权(弹浏览器,不存密码)</div>
+  <div class="menu-item" onclick="closeSheet();reauthAcc('${k}')"><span class="ic">↻</span>重新授权(静默换凭据)</div>
   <div class="menu-item" onclick="closeSheet();openLogs('${k}')"><span class="ic">📜</span>查看日志</div>
   <div class="menu-item red" onclick="closeSheet();delAccount('${k}')"><span class="ic">🗑</span>删除账号</div>`);}
+async function reauthAcc(k){
+  busy(true,'静默换凭据中…');
+  const r=await post('/reauth/'+k);
+  busy(false);toast(r.ok?'✅ 换新成功':'❌ '+r.message);refresh();
+}
 function siteMenu(k){openSheet('站点操作',`<div class="menu-item" onclick="closeSheet();editSiteSheet('${k}')"><span class="ic">✎</span>编辑站点</div>
   <div class="menu-item" onclick="closeSheet();addAccSheet('${k}')"><span class="ic">＋</span>添加账号</div>
   <div class="menu-item red" onclick="closeSheet();confirmDlg('删除站点','确认删除该站点及其全部账号?',async()=>{await api('/sites/${k}',{method:'DELETE'});toast('已删除');refresh();})"><span class="ic">🗑</span>删除站点</div>`);}
@@ -320,10 +329,23 @@ async function startAuto(k){const gh=$('#af_gh').value.trim(),pw=$('#af_pw').val
 async function startOAuth(k,mode){busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
   const t=await post(mode==='auto'?'/oauth/start':'/oauth/manual',{accountKey:k});
   if(!t.task){busy(false);toast(t.detail||'发起失败');return;}
-  const tick=async()=>{const s=await api('/oauth/status?task='+t.task);
-    if(s.state==='running'){busy(true,s.message||'授权中…');setTimeout(tick,3000);}
-    else{busy(false);toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+s.message);refresh();}};
+  /* 授权进行中弹层:显示进度 + 可随时填入手机 6 位 2FA 码(30s 有效,注入后自动使用) */
+  openSheet('授权进行中',`<div class="hint" id="oaMsg">…</div>
+  <div class="fld" style="margin-top:8px"><label>手机 2FA 6 位码(全自动凭据无 2FA 密钥/或码失效时手动补)</label>
+    <input id="oa_totp" inputmode="numeric" maxlength="6" placeholder="如 482913,30秒内有效"></div>
+  <button class="btn lb w100" onclick="sendTotp()">注入 2FA 码</button>`);
+  const tick=async()=>{
+    const s=await api('/oauth/status?task='+t.task);
+    const m=$('#oaMsg');
+    if(s.state==='running'){busy(true,s.message||'授权中…');if(m)m.textContent=s.message||'授权中…';setTimeout(tick,3000);}
+    else{busy(false);closeSheet();toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+s.message);refresh();}};
   tick();}
+async function sendTotp(){
+  const code=($('#oa_totp')||{}).value?.trim();
+  if(!/^\d{6}$/.test(code)){toast('请输入 6 位数字码');return;}
+  const r=await post('/oauth/totp',{code});
+  toast(r.ok?'已注入,授权任务会立即使用':'注入失败');
+}
 /* 账号添加:原版交互——从全局凭据库选(同 GitHub 一条,不重复新建),或录入新凭据 */
 function addAccSheet(siteKey){
   const sites=CFG?.sites||[];
@@ -363,27 +385,41 @@ async function addAccWithCred(siteKey,credId,alias,gh){
     if(created)startOAuth(created.key,'auto');
   }else toast(r.detail||'失败');
 }
-/* 凭据库管理:录入/编辑(同 githubUser 去重) */
+/* 凭据库管理:录入/编辑(同 githubUser 去重)。
+ * 安全策略:后端列表 API 只返回 hasPassword/hasTwofa 标记,不回显明文。
+ * 弹层逻辑:新建必须填密码(可选 TOTP);编辑时留空=保留原值,只有真正输入才覆盖;
+ * 旁边附"清除密码"/"清除 2FA"明示按钮,防误点。 */
 function credFormSheet(cid){
   const c=(cid?(window.__creds||[]).find(x=>x.id===cid):null)||{};
   openSheet(cid?'编辑凭据':'录入新账号凭据',`<div class="hint" style="margin-bottom:8px">同一 GitHub 账号只需录入一次(密码/2FA AES-256-GCM 加密),可绑定到任意多个站点。</div>
   <div class="fld"><label>备注名(可留空用 GitHub 名)</label><input id="cf_alias" value="${esc(c.alias||'')}" placeholder="如 主号"></div>
-  <div class="fld"><label>GitHub 用户名</label><input id="cf_gh" value="${esc(c.githubUser||'')}" placeholder="AI模型API"></div>
-  <div class="fld"><label>GitHub 密码(留空则不修改/不设置)</label><input id="cf_pw" type="password"></div>
-  <div class="fld"><label>TOTP 密钥(2FA setup key,无则留空)</label><input id="cf_tp" value="${esc(c.totpSecret||'')}" placeholder="如 JBSWY3DPEHPK3PXP"></div>
-  <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>`);
+  <div class="fld"><label>GitHub 用户名</label><input id="cf_gh" value="${esc(c.githubUser||'')}"></div>
+  <div class="fld"><label>GitHub 密码${cid?`（${c.hasPassword?'当前: 已配置(●●●●)':'未配置'}，留空=保留）`:''}</label>
+    <input id="cf_pw" type="password" placeholder="${cid?'留空保留原密码':'必填，用于自动授权'}"></div>
+  <div class="fld"><label>TOTP 密钥(2FA setup key)${cid?`（${c.hasTwofa?'当前: 已配置':'未配置'}，留空=保留）`:''}</label>
+    <input id="cf_tp" placeholder="如 JBSWY3DPEHPK3PXP，留空保留/不配"></div>
+  <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>
+  ${cid?`<button class="btn r w100" onclick="clearCredPw('${cid}')">清除密码(切为手动授权模式)</button>`:''}`);
 }
 async function saveCredForm(cid){
   const body={};
   if(cid)body.id=cid;
   const al=$('#cf_alias').value.trim(); if(al)body.alias=al;
   const gh=$('#cf_gh').value.trim(); if(gh)body.githubUser=gh;
-  const pw=$('#cf_pw').value; if(pw)body.password=pw; else if(cid)body.password='';
+  /* 留空不发 = 后端不修改;只有真正输入才覆盖(之前留空清空是 bug) */
+  const pw=$('#cf_pw').value; if(pw)body.password=pw;
   const tp=$('#cf_tp').value.trim(); if(tp)body.twofa=tp;
   if(!cid&&!gh){toast('需要 GitHub 用户名');return;}
+  if(!cid&&!pw){toast('新建需要密码');return;}
   const r=await post('/credentials',body);
   toast(r.ok?((r.duplicated?'已复用已有凭据':'凭据已保存')):(r.detail||'失败'));
   if(r.ok){closeSheet();refresh();}
+}
+async function clearCredPw(cid){
+  confirmDlg('清除密码','清除后该凭据只剩 TOTP/备注,自动授权将不可用；如需恢复可随时重录。确认清除?',async()=>{
+    const r=await post('/credentials',{id:cid,password:''});
+    toast(r.ok?'密码已清除':'失败');if(r.ok)credListSheet();
+  });
 }
 function credListSheet(){
   openSheet('账号凭据库',`<div class="hint" style="margin-bottom:6px">全局凭据库:同一 GitHub 账号一条,绑定到多个站点账号复用。</div>
@@ -434,6 +470,24 @@ async function logTab(k,kind){const box=$('#logBody');if(!box)return;box.textCon
   else{const r=await api('/logs/'+k+'?category=系统&limit=50');if(!r.ok){box.textContent=r.detail||'获取失败';return;}
     const rows=r.rows||[];box.textContent=(r.lastBonus?`🎁 最近签到奖励: ${r.lastBonus.text}\n${'─'.repeat(24)}\n`:'')+rows.map(x=>`[${(x.time||'').slice(0,19)}] ${x.text}`).join('\n')||'无记录';}}
 async function openLocalLog(){openSheet('本地运行日志',`<div class="logbox" id="logBody2">加载中…</div>`);const r=await api('/history');const box=$('#logBody2');if(box)box.textContent=(r.data||[]).slice(0,120).map(l=>`[${(l.time||'').slice(0,19)}] [${l.site||'-'}] ${l.account||''} ${l.event} ${JSON.stringify(l.detail||'')}`).join('\n');}
+/* SSE 实时日志:EventSource 订阅 /api/events,断线自动重连 */
+let liveES=null;
+function openLiveLog(){
+  openSheet('实时日志',`<div class="logbox" id="liveBox" style="max-height:52vh">连接中…</div>
+  <div class="hint" style="margin-top:6px">EventSource 订阅,新日志 2 秒内推送;关闭弹层即断开。</div>`);
+  if(liveES){liveES.close();}
+  liveES=new EventSource('/api/events');
+  const box=$('#liveBox');
+  liveES.onopen=()=>{if(box)box.textContent='';};
+  liveES.onmessage=ev=>{
+    if(!box||!document.body.contains(box)){liveES.close();return;}
+    try{
+      const l=JSON.parse(ev.data);
+      box.textContent=`[${(l.time||'').slice(11,19)}] [${l.site||'-'}] ${l.account||''} ${l.event} ${JSON.stringify(l.detail||'')}\n`+box.textContent;
+    }catch(_){}
+  };
+  liveES.onerror=()=>{if(box&&!box.textContent)box.textContent='连接失败';};
+}
 function openAsset(){const sites=(CFG?.sites||[]).filter(s=>(s.accounts||[]).length);
   openSheet('各站点资产',sites.map(s=>{let t=0,n=0;for(const a of s.accounts||[]){const e=document.querySelector(`[data-q="${a.key}"]`);if(e&&e.dataset.usd){t+=+e.dataset.usd;n++;}}
     return `<div class="menu-item"><span style="font-weight:700;color:var(--blue)">${esc(s.name)}</span><div class="sp"></div><span class="hint">$${USD(t)} (${n} 号已取)</span></div>`}).join('')||'暂无数据,先点「刷新」');}
