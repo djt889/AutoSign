@@ -33,6 +33,7 @@ class CallResult:
     error: str = ""           # 网络层错误信息
     reauthed: bool = False
     blocked_by_waf: bool = False
+    set_cookies: list[str] = field(default_factory=list)   # 响应 Set-Cookie 原始值列表
 
     def is_401(self) -> bool:
         return self.status == 401
@@ -109,7 +110,21 @@ class SiteClient:
                 kwargs["json"] = body
             r = getattr(s, method)(url, **kwargs)
             body_str = r.body.decode("utf-8", "replace") if isinstance(r.body, bytes) else str(r.body)
-            return CallResult(ok=True, status=r.status, raw=body_str)
+            # Set-Cookie 抓取(契约 §3.0:OAuth 交换凭据规则,全站通用)
+            sc_vals: list[str] = []
+            try:
+                hdrs = getattr(r, "headers", None)
+                if hdrs is not None:
+                    get_list = getattr(hdrs, "get_list", None)
+                    if callable(get_list):
+                        sc_vals = list(get_list("set-cookie") or [])
+                    else:
+                        single = hdrs.get("set-cookie") or hdrs.get("Set-Cookie")
+                        if single:
+                            sc_vals = [single] if isinstance(single, str) else list(single)
+            except Exception:
+                pass
+            return CallResult(ok=True, status=r.status, raw=body_str, set_cookies=sc_vals)
 
     # ---------- 通用调用(含 429 退避 + WAF 假 200 识别) ----------
 
