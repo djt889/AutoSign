@@ -197,12 +197,24 @@ async function loadStatus(key,force){
   document.querySelectorAll(`[data-q="${key}"]`).forEach(e=>{e.textContent='$'+USD(r.availableUSD);e.dataset.usd=r.availableUSD;});
   document.querySelectorAll(`[data-tu="${key}"]`).forEach(e=>e.textContent=r.todayUsed!=null?'今日消耗 $'+USD(r.todayUsed):'今日消耗 -');
   document.querySelectorAll(`[data-uu="${key}"]`).forEach(e=>e.textContent='累计已用 $'+USD(r.usedUSD));
-  updateTotal();return r;
+  updateTotal();updateSiteSums();return r;
 }
 function updateTotal(){
   let t=0;TKS.forEach(x=>{const e=document.querySelector(`[data-q="${x.key}"]`);if(e&&e.dataset.usd)t+=+e.dataset.usd;});
   $('#totalV').textContent='$'+USD(t);
   const sf=$('#side-total'); if(sf)sf.innerHTML='总资产 <b>$'+USD(t)+'</b>';
+}
+/* 每个站点卡的「站总额」:该站所有账号余额之和(数据已在 DOM) */
+function updateSiteSums(){
+  (CFG?.sites||[]).forEach(s=>{
+    const el=document.querySelector(`[data-site-sum="${s.key}"]`); if(!el)return;
+    let sum=0,n=0;
+    for(const a of s.accounts||[]){
+      const q=document.querySelector(`[data-q="${a.key}"]`);
+      if(q&&q.dataset.usd){sum+=+q.dataset.usd;n++;}
+    }
+    el.textContent = n ? ('$'+USD(sum)) : '-';
+  });
 }
 
 /* ===== 看板:站点卡 → 账号行(全端同一套) ===== */
@@ -211,7 +223,7 @@ function render(){
   const sites=CFG?.sites||[],n=TKS.length,ok=TKS.filter(authed).length;
   $('#summary').textContent=`${sites.length}站 ${n}号 · ${ok}已签 ${n-ok}待签`;
   const ss=$('#side-summary'); if(ss)ss.textContent=`${sites.length}站 ${n}号 · ${ok}已签`;
-  renderBoard();renderSettings();updateTotal();
+  renderBoard();renderSettings();updateTotal();updateSiteSums();
 }
 function accRow(s,a){
   const k=a.key,au=authed(a),gh=a.githubAccount?'@'+a.githubAccount:'';
@@ -237,7 +249,8 @@ function renderBoard(){
     return `<div class="site-card">
       <div class="site-head">
         <div><div class="site-name" onclick="window.open('${esc(s.affUrl||s.baseUrl)}','_blank')">${esc(s.name)} <span style="font-size:11px;opacity:.6">›</span></div>
-        <div class="site-meta">${esc((s.baseUrl||'').replace(/^https?:\/\//,''))} · ${s.checkinType==='login'?'登录即发额度·每日重登':'需单独签到·全自动'}</div></div>
+        <div class="site-meta">${esc((s.baseUrl||'').replace(/^https?:\/\//,''))} · ${s.checkinType==='login'?'登录即发额度·每日重登':'需单独签到·全自动'}
+          · <b style="color:var(--green)">站总额 <span data-site-sum="${s.key}">-</span></b> · ${accs.length} 号</div></div>
         <div class="site-ovf" onclick="siteMenu('${s.key}')">⋯</div></div>
       ${accs.length
         ?(twoCol?`<div class="acc-wrap">${accs.map(a=>accRow(s,a)).join('')}</div>`:accs.map(a=>accRow(s,a)).join(''))
