@@ -3,9 +3,10 @@
 **项目名**:AutoSign(仓库 justsign)
 **目标**:改造为「WebUI 本地服务器部署 + Python(Scrapling)引擎」的自动签到系统,保留 Android 端但同步换成同一套 Python 引擎
 **fork**:`djt889/justsign`(源自 `AI-modelsAPI/justsign`)
-**文档版本**:v1.1
+**文档版本**:v1.2
 **日期**:2026-09-08
 **v1.1 修订**:明确「接口复用 vs Scrapling 抓取」分工;澄清自动限速(AutoThrottle)仅属 Spider 框架、普通 fetch 不自动限速;授权流程改为「纯后台 headless 为主,弹出浏览器仅兜底」;新增 `capture_xhr` 背景接口监听辅助手段。
+**v1.2 修订**:3.0 契约清单补全 cookie 型站点凭据规则(AgentRouter 命门:Set-Cookie 真凭据、token/cookie 任一变化即成功、`login=` 防串号、GitHub 过期 URL 转人工清单、「免退出重登」=静默重放 OAuth);3.2 功能选型表全面扩充(标签页池/wait_selector/page_setup/init_script/多指纹轮换/locale+timezone 一致性等);0.1.1 `capture_xhr` 升级为授权交换首选手段。
 
 ---
 
@@ -70,6 +71,7 @@
 |---|---|---|
 | **站点 API 调用** | `client.js` / `Engine.java` (axios/OkHttp) | `self / status / log/self / checkin`,Bearer token + 可选 Cookie,支持 SOCKS5 代理 |
 | **站内用户 ID 透传** | `Engine.java`:`New-Api-User: <siteUserId>` 请求头 | 账号授权响应 `data.id` 落库后随每个请求透传(AgentRouter 等变体必需) |
+| **cookie 型站点凭据** | `SilentAuth.java`(审计 B-02/B-03):OAuth 交换响应的 `Set-Cookie` session 才是真凭据,`access_token` 可为 null | AgentRouter 类站点;「退出重登」由静默重放 OAuth 隐式完成,无 logout 接口(详见 3.0) |
 | **签到前置判定** | 先 `GET /api/user/checkin?month=YYYY-MM` 查已签,确认未签才 `POST` | 减少无效 POST,且只读接口不触发人机验证 |
 | **Turnstile 处理** | `CheckinJs.java` 注入官方挂件,`appearance: interaction-only` 静默通过 | POST 被拦时才挂 |
 | **OAuth 授权** | `auth.js` / `SilentAuth.java`/`AuthActivity.java`:拿 flow_token → 开浏览器 → GitHub 授权 → 回调页 fetch 交换 → 存 token+cookie | 全程浏览器,自动填充、2FA、SPA 回调 |
@@ -112,7 +114,7 @@
 │  │  ├─ SiteClient    站点 API 调用(FetcherSession, 可挂代理)    │  │
 │  │  ├─ OAuthFlow     GitHub OAuth 自动化(全 headless 优先)      │  │
 │  │  │   ├─ StealthyFetcher: Cloudflare/Turnstile 自动过         │  │
-│  │  │   └─ DynamicFetcher: 表单填写/点击/2FA/SPA 回调           │  │
+│  │  │   └─ 标签页池 + capture_xhr 交换 + user_data_dir 隔离    │  │
 │  │  ├─ CredentialManager 凭据管理(AES-GCM 加密)                 │  │
 │  │  └─ SessionIsolation 站点×账号 cookie 隔离                   │  │
 │  └──────────────────────────────────────────────────────────────┘  │
@@ -166,8 +168,30 @@
 | `/api/user/checkin` | POST | 同上 | 成功响应含奖励信息 | 真正签到动作 |
 | `/api/user/checkin?turnstile=<token>` | POST | 同上 + turnstile token | 同上 | POST 被拦(响应匹配 `/turnstile\|captcha\|验证\|校验\|人机\|challenge\|robot/i`)时才走此变体 |
 | `/api/oauth/state` | POST(默认)或 GET | body `{"provider":"github","intent":"login"}` / GET `?mode=login` | `data` 为 String 直接是 state,或 `data.flow_token` | **两种形态**:多数站走 POST;AgentRouter 一类只认 GET(POST 直接 404)。先 POST,404 则改 GET,`stateMethod=get` 记入站点 meta |
-| `/api/oauth/{provider}?code=&state=` | GET(回调页上下文) | — | `{success:true, data:{access_token, user:{username/login}, id}}` | 回调页页面上下文内交换;`data.id` = 站内用户 ID,落库后随请求透传 `New-Api-User` 头 |
+| `/api/oauth/{provider}?code=&state=` | GET(服务端直调) | `Accept: application/json` + UA | `{success:true, data:{access_token?, user?, id, github_id?}}` + **响应头 `Set-Cookie`** | 见下方「cookie 型站点凭据规则」 |
 | `/api/user/auth/refresh` | ~~POST~~ | — | — | **已废弃,不要实现**(原 v0.2.3 已删除:httpOnly Cookie 在 App 侧无法稳定维持,实测 401) |
+
+**cookie 型站点凭据规则(AgentRouter 等,opus4.8 审计 B-02/B-03,必读)**
+
+New API 系登录凭据是 OAuth 交换响应的 **`Set-Cookie` session**(gin 框架),`access_token` 是可选系统令牌,**可能为 JSON null**:
+
+1. 交换 `/api/oauth/{provider}` 时必须**抓取响应头 `Set-Cookie`**,逐条解析只保留有值的(跳过 `Max-Age=0`/空值/`deleted` 删除态),拼成 `k1=v1; k2=v2` 落库为 `siteCookie`。
+2. token 兼容三字段名:`access_token` / `accessToken` / `token`,空串、`null`、缺失一律视为无 token。
+3. 身份字段:`data` 直接是用户对象(AgentRouter 型,`data.username`/`data.id`/`data.github_id`),旧版在 `data.user` 里(`username`/`login`)——**两层都试**;`data.id` = 站内用户 ID(siteUserId)。
+4. **换新成功判据:token 或 siteCookie 任一变化即算成功**(cookie 型站可能 token 一直为 null,只刷 cookie)。
+5. 后续业务请求:cookie 型站带 `Cookie: <siteCookie>` + `New-Api-User: <siteUserId>` 头;token 型站带 `Authorization: Bearer`。
+6. 交换响应若 `github_id`/`github_user_id` 与账号缓存不一致 ⇒ **拒绝**(防串号,锚点分层校验)。
+
+**「重新登录」语义(重要,免退出实现)**
+
+原项目**不实现任何 logout 接口**。AgentRouter 这类站点的"退出重登才能签到"由**静默重放一遍 GitHub OAuth** 隐式完成:每次 OAuth 交换服务端都下发全新 `Set-Cookie` session(旧会话自然作废),等价于"退出+重登"一步到位。触发与保护:
+
+- 触发:JWT `exp` 剩余 < 60s 预判换新,或业务请求 401 兜底换新(换完重试一次,标记 `reauthed:true`)
+- 授权 URL 强制带 **`login=<期望GitHub账号>`** 参数:强制 GitHub 以指定账号授权,防 WebView/浏览器里登录了别的 GitHub 账号导致串号
+- 重放全程 headless:GitHub 会话 cookie 在持久化分区(`user_data_dir`)里,正常情况直接 302 跳回回调页,秒级完成
+- **转人工判定**:重放途中浏览器导航到 `github.com/login`、`/session`、`two-factor`、`verified-device`、`sudo` 任一 URL ⇒ GitHub 会话本身过期,转方式 B/C(自动填充账密/2FA)
+- 快速失败:会话已登录且期望账号明确却卡在授权确认页(8s 无人点)⇒ 立即转人工,不空等 30s
+- 防风暴三重保护:同账号串行(asyncio.Lock)+ 成功 8s 复用 + 失败 90s 冷却
 
 **调用通用规则(来自 `Engine.java` / `AuthActivity.java`)**
 
@@ -247,27 +271,61 @@ pc/  (Python Core, 新目录, 替换 src/)
 
 ### 3.2 Scrapling 功能选用清单(参数已对照官方文档核实)
 
-**按需选用,不全家桶。** 本项目是「定时 API 客户端 + 少量浏览器自动化」,不是爬虫:
+**按需选用,不全家桶;能用的增强全部用上。** 本项目定位「定时 API 客户端 + 少量浏览器自动化」:
+
+**A. 网络传输层(日常签到/额度刷新)**
 
 | 功能 | 用? | 选法 | 场景 |
 |---|---|---|---|
 | TLS 指纹伪装 | ✅ | `FetcherSession(impersonate='chrome')` | 日常站点 API 调用,降低 WAF 拦截率 |
 | 隐私请求头 | ✅ | `stealthy_headers=True`(默认开) | 自动生成真实浏览器头 + Google referer |
 | Cookie 持久会话 | ✅ | `FetcherSession` 上下文管理器 | cookie 型站点自动维持会话;比单请求快约 10 倍 |
+| 多指纹轮换 | ✅ | `impersonate=["chrome","firefox"]` 列表随机选 | 每站点固定指纹反易被画像;列表轮换更稳 |
 | 通用重试 | ✅ | `retries=2, retry_delay=1` | 网络抖动;**429 逻辑自实现**(见 3.3) |
 | ProxyRotator | ✅ | `ProxyRotator(proxies=[...])` 传 Session;浏览器场景每代理独立 context,所用代理在 `response.meta['proxy']` | 多代理轮换 + 429 换节点 |
 | DoH(DNS-over-HTTPS) | ✅ | 浏览器 fetcher `dns_over_https=True` | 走代理时防 DNS 泄漏 |
-| 广告/资源屏蔽 | ✅ | `block_ads=True` + `disable_resources` | 浏览器场景提速(屏蔽 font/image/media 等) |
+| SSRF 安全跟随 | ✅ | `follow_redirects='safe'`(默认) | 跟随重定向但拒绝内网/私有 IP,回调链路安全 |
+| 客户端证书 | ❌ | `cert` 参数 | 站点无此要求 |
+
+**B. 浏览器自动化层(授权/静默换凭据/Turnstile 兜底)**
+
+| 功能 | 用? | 选法 | 场景 |
+|---|---|---|---|
 | Cloudflare 求解 | ✅ | `StealthyFetcher(..., solve_cloudflare=True)` | Turnstile/Interstitial;POST 被拦时的兜底 |
-| 指纹防护 | ✅ | `hide_canvas=True, block_webrtc=True` | 隐身增强(WebGL 保持默认开,禁用会反而被 WAF 检出) |
-| `user_data_dir` | ✅ | StealthyFetcher 参数 | **授权会话持久化核心**:GitHub 登录态存本地,支撑静默换凭据 |
-| `capture_xhr` | ✅ | 浏览器 fetcher 参数 | 授权回调页自动捕获 `/api/oauth/*` 交换响应,免注入 JS(见 0.1.1) |
-| `page_action` | ✅ | 浏览器 fetcher 参数 | 回调内拿 Playwright page 做自动填充(见 3.0 契约) |
-| CDP 接管 | ✅(兜底) | `cdp_url=...` | 连已运行的真实浏览器(授权兜底方式 B) |
-| HTTP/3 | ❌ | — | 与 impersonate 有兼容问题,签到场景无收益 |
-| adaptive 自适应选择器 | ❌ | — | 本项目不解析 HTML 结构,表单选择器固定 |
-| Spider 爬虫框架 | ❌ | — | 不是爬虫场景;AutoThrottle 也不适用(见 3.3) |
-| CLI / shell / MCP / RAG | ❌ | — | 非本项目场景 |
+| 指纹防护 | ✅ | `hide_canvas=True, block_webrtc=True, timezone_id` | 隐身增强(WebGL 保持默认开,禁用反而被 WAF 检出) |
+| `user_data_dir` | ✅ | 每站点×账号一个目录 | **授权会话持久化核心**:GitHub 登录态存本地,静默换凭据秒级完成 |
+| 标签页池 | ✅ | `StealthySession(max_pages=N)`(0.4.15 起复用标签) | 多账号并行授权复用浏览器,省启动开销;`get_pool_stats()` 暴露给 WebUI 监控 |
+| `page_action` | ✅ | 导航后回调,拿 Playwright page 做自动填充 | 全部 AuthFill 逻辑(填账密/点登录/2FA 切换) |
+| `page_setup` | ✅ | 导航前回调 | 注册路由/事件监听(如监听 GitHub 会话过期跳转) |
+| `wait_selector` + 状态 | ✅ | `wait_selector='#login_field', wait_selector_state='visible'` | 比 sleep 更可靠的「等登录框出现」;4 种状态 attached/detached/visible/hidden |
+| `network_idle` | ✅ | 授权页/回调页等待 | SPA 回调页加载完成判定(至少 500ms 无网络连接) |
+| `capture_xhr` | ✅ | `capture_xhr=r'/api/oauth/'`(正则) | **授权 token 交换首选**:回调页前端自己发的交换请求响应自动收进 `response.captured_xhr`,免注入 JS |
+| `init_script` | ✅ | 页面创建时执行的 JS 文件 | 注入 MutationObserver 等 AuthFill 辅助脚本(SPA 动态渲染 45s 重试) |
+| 广告/资源屏蔽 | ✅ | `block_ads=True` + `disable_resources` | 浏览器提速(~25%),屏蔽 font/image/media 等 |
+| `real_chrome` / `executable_path` | ✅ | 指向本机 Chrome | 真实浏览器指纹比 bundled Chromium 更稳;CI/服务器无 Chrome 时回落 |
+| CDP 接管 | ✅(兜底) | `cdp_url=...` | 连已运行的真实浏览器(授权方式 B 变体) |
+| `google_search` referer | ✅(默认开) | 自动设 Google referer | 首次访问像从搜索点进来,更像真人 |
+| `locale` / `timezone_id` | ✅ | 与代理出口地一致 | 指纹一致性(走美国代理却带中国时区会被识破) |
+
+**C. 响应解析层**
+
+| 功能 | 用? | 选法 | 场景 |
+|---|---|---|---|
+| `Response.body` / `.status` / `.headers` | ✅ | — | 站点 API 全是 JSON,`json.loads(resp.body)` 即可;WAF 假 200 判定看 body 是否合法 JSON |
+| `captured_xhr` 逐项 | ✅ | `.url / .status / .body` | 授权交换响应直接读 |
+| CSS 选择器解析 | ✅(轻量) | `page.css('#login_field')` | 自动填充前探测页面元素是否存在(2FA 切换链接等) |
+| adaptive 自适应选择器 | ❌ | — | 本项目表单选择器固定且已验证,无需自适应重定位 |
+| `find_similar` / `below_elements` | ❌ | — | 非爬虫场景 |
+
+**D. 明确不用的**
+
+| 功能 | 理由 |
+|---|---|
+| Spider 爬虫框架(含 AutoThrottle) | 不是爬虫;限速在 SiteClient 自实现(见 3.3) |
+| HTTP/3 | 与 impersonate 有兼容问题,签到场景无收益 |
+| 导出器(JSON/CSV/XML)、流式抓取、断点续爬 | 非批量采集场景 |
+| CLI(`scrapling shell/extract`)、MCP server、Agent Skill | 开发期可临时用 `scrapling shell` 调试站点,不进运行时 |
+| 存储系统(SQLiteStorageSystem) | 配置/日志用自有 JSON 方案(兼容原仓库格式) |
 
 ### 3.3 自动限速的准确答案(v1.1 澄清)
 
@@ -386,7 +444,7 @@ GET    /api/events                        # SSE 实时日志流
    - `user_data_dir` 指向「站点×账号」专属目录 ⇒ **GitHub 登录态 cookie 持久化,第二次授权起免登录**(即 SilentAuth 语义)
    - `page_action` 回调内做全部自动填充(选择器契约见 3.0):填账号密码 → 点登录 → 2FA 切 authenticator + 填码(6 位码由服务端 `pyotp` 凭 TOTP 密钥现场生成)→ 等回调跳转
    - `capture_xhr='/api/oauth/'` 自动捕获回调页前端自己发出的交换请求响应,直接读出 `access_token`(**首选**;主动 evaluate fetch 作为备用)
-3. 校验 OAuthCallback 规则(同域 + code + state 严格匹配),落盘 token/cookie/siteUserId。
+3. 校验 OAuthCallback 规则(同域 + code + state 严格匹配)后,由**服务端直接 GET `/api/oauth/{provider}?code&state` 完成交换**(等价原版 OkHttp 直调;`capture_xhr` 里回调页前端的交换响应可作交叉验证),**抓响应头 `Set-Cookie` 拼 `siteCookie`**(cookie 型站真凭据,见 3.0 规则),连同 token/`data.id`(siteUserId)一起落盘。
 4. 预估耗时:已有会话 <10s;首次登录 1-3 分钟(自动填充等待)。
 
 **方式 B(有头浏览器,手动触发的兜底)**
@@ -406,15 +464,18 @@ GET    /api/events                        # SSE 实时日志流
 3. F12 → Network → 找 `/api/oauth/{provider}` 响应 → 复制 `data.access_token`
 4. WebUI 粘贴 token 完成绑定(`POST /api/accounts/save`)
 
-### 5.3 静默换凭据(SilentAuth 平移)
+### 5.3 静默换凭据(SilentAuth 平移,含 cookie 型站「免退出重登」)
 
-在 Python 侧实现等价的 `silent_auth.py`:
+**核心:不实现任何 logout 接口。** AgentRouter 这类站点"退出重登才能签到"的需求,由静默重放一遍 GitHub OAuth 隐式完成——每次 OAuth 交换服务端都下发全新 `Set-Cookie` session(旧会话自然作废),等价于"退出+重登"一步到位(见 3.0「重新登录」语义)。
 
-- 解析 JWT `exp`,剩余 < 60s → 提前换新
-- 业务请求遇 401 → 换新 → 重试一次
-- 同账号串行(asyncio.Lock)+ 成功后 8s 内复用(`LAST_OK`)
-- 失败后 90s 冷却(`FAIL_UNTIL`),手动授权可清冷却
-- 换新 = 方式 A 的 headless 流程复用「站点×账号」`user_data_dir`(GitHub cookie 在,秒级完成):`fetch /api/oauth/state` → 打开 authorize URL(已登录态直接 302 回调)→ 交换 → 落盘
+Python 侧 `silent_auth.py` 完整规则:
+
+- **触发**:JWT `exp` 剩余 < 60s 预判换新;或业务请求 401 兜底换新(换完重试一次,标记 `reauthed:true`)
+- **换新流程** = 方式 A headless 流程,复用「站点×账号」`user_data_dir`(GitHub cookie 在,秒级完成):`fetch /api/oauth/state` → 打开 authorize URL(**带 `login=<期望账号>` 参数**,强制指定 GitHub 账号,防浏览器里登录了别的账号串号)→ 交换 → 落盘
+- **落盘内容**:token(三字段名兼容,可能为 null)+ `siteCookie`(从交换响应 `Set-Cookie` 抓取,跳过删除态)+ `siteUserId`(`data.id`);**token 或 cookie 任一变化即算换新成功**
+- **防风暴**:同账号串行(asyncio.Lock)+ 成功后 8s 内复用(`LAST_OK`)+ 失败后 90s 冷却(`FAIL_UNTIL`,手动授权可清)
+- **转人工判定**:重放途中浏览器导航到 `github.com/login`、`/session`、`two-factor`、`verified-device`、`sudo` 任一 URL ⇒ GitHub 会话本身过期,转方式 B/C(AuthFill 自动填充账密/2FA);会话已登录却卡授权确认页 8s ⇒ 快速转人工不空等
+- **身份锚点校验**:交换响应 `github_id`/`github_user_id` 与账号缓存不一致 ⇒ 拒绝落盘(防串号)
 - **凭据库**:站点账号/密码/GitHub 用户名/TOTP 密钥,AES-256-GCM 加密落盘(主密钥 `data/secret.key`,0600);TOTP 码由 `pyotp` 现场生成
 
 ### 5.4 与原版行为对照
@@ -427,6 +488,9 @@ GET    /api/events                        # SSE 实时日志流
 | WebView Profile 分区(站点×账号) | `user_data_dir` 目录隔离 | 一一对应 |
 | AuthFillJs 注入 + JS 自动填充 | `page_action` + Playwright API | 选择器契约照搬(3.0) |
 | 2FA 码用户手动输入 | **新增:pyotp 自动生成 TOTP** | 凭据库存 TOTP 密钥 |
+| OAuth 交换 OkHttp 直调 + 抓 Set-Cookie | FetcherSession 直调 + 抓 Set-Cookie | cookie 型站(AgentRouter)命门,平移 |
+| authorize URL 带 `login=<账号>` | 保留同参数 | 防 GitHub 账号串号 |
+| GitHub 过期 URL 判定转人工(login/session/two-factor/verified-device/sudo) | 保留同清单 | 原版实测定案 |
 
 ---
 
