@@ -245,7 +245,8 @@ def authorize(site: dict, account: dict, cfg: dict,
                                     "loginParam": bool(want_login), "state": flow_token[:6] + "***"})
 
     # 2. headless 浏览器走授权(user_data_dir 持久化 GitHub 会话)
-    holder: dict[str, Any] = {"final_url": "", "github_ok": False, "chain": []}
+    holder: dict[str, Any] = {"final_url": "", "github_ok": False, "chain": [],
+                              "site_cookies": ""}
     prj = profile_dir(sk, ak)
 
     def action(page):
@@ -269,7 +270,17 @@ def authorize(site: dict, account: dict, cfg: dict,
             url = page.url
             host = urlparse(url).hostname or ""
             if host == site_host:
-                # 站点域:URL 链里可能有带 code 的中间跳转,优先用链判定
+                # 站点域:URL 链里可能有带 code 的中间跳转,优先用链判定;
+                # 同时导出浏览器站点 cookie(httpOnly session 完整版——
+                # 服务端 FetcherSession 抓 Set-Cookie 会漏,实测 AgentRouter 只抓到
+                # WAF 的 acw_tc,真凭据 session 只存在于浏览器上下文)
+                try:
+                    all_cookies = page.context.cookies()
+                    ar = [c for c in all_cookies if site_host in (c.get("domain") or "")]
+                    holder["site_cookies"] = "; ".join(
+                        f"{c['name']}={c['value']}" for c in ar)
+                except Exception:
+                    pass
                 holder["github_ok"] = True
                 return
             on_wall = bool(NEED_MANUAL_URL_RE.search(url))
@@ -322,7 +333,8 @@ def authorize(site: dict, account: dict, cfg: dict,
                                                     "via": "capture_xhr"})
                     if creds.get("token") or creds.get("github_login"):
                         return _finish_auth(sk, ak, site, account, creds, cfg,
-                                            xhr_headers=xhr.headers)
+                                            xhr_headers=xhr.headers,
+                                            browser_cookies=holder["site_cookies"])
         except Exception:
             continue
 
@@ -369,34 +381,36 @@ def authorize(site: dict, account: dict, cfg: dict,
         return AuthResult("failed", msg)
 
     return _finish_auth(sk, ak, site, account, extract_credentials(ex.data), cfg,
-                        set_cookies=ex.set_cookies)
+                        set_cookies=ex.set_cookies,
+                        browser_cookies=holder["site_cookies"])
 
 
 def _finish_auth(sk: str, ak: str, site: dict, account: dict, creds: dict,
                  cfg: dict, set_cookies: list[str] | None = None,
-                 xhr_headers: Any = None) -> AuthResult:
-    """凭据落库收尾(主交换路径与 capture_xhr 保险路径共用):B1 校验 + Set-Cookie。"""
+                 xhr_headers: Any = None,
+                 browser_cookies: str = "") -> AuthResult:
+    """凭据落库收尾(主交换/capture_xhr 保险路径共用):B1 校验 + 凭据合成。
+
+    site_cookie 取三者并集:浏览器上下文导出(最全,含 httpOnly session)
+    > 服务端 Set-Cookie 解析 > capture_xhr 响应头。实测依据:AgentRouter 的
+    真凭据 session 是 httpOnly,服务端 FetcherSession 只抓到 WAF acw_tc。
+    """
     ok, why = b1_identity_check(creds, account)
     if not ok:
         db.append_log(sk, ak, "oauth", {"step": "b1", "error": why}, "err")
         return AuthResult("failed", f"身份校验失败:{why}")
 
-    site_cookie = ""
-    if set_cookies:
-        site_cookie = parse_set_cookies(set_cookies)
-    elif xhr_headers is not None:
-        # XHR 保险路径:从捕获的响应头里抓 Set-Cookie
-        vals: list[str] = []
-        try:
-            get_list = getattr(xhr_headers, "get_list", None)
-            if callable(get_list):
-                vals = list(get_list("set-cookie") or [])
-            else:
-                single = xhr_headers.get("set-cookie")
-                vals = [single] if isinstance(single, str) else list(single or [])
-        except Exception:
-            pass
-        site_cookie = parse_set_cookies(vals)
+    parts: dict[str, str] = {}
+    for source in (browser_cookies,
+                   parse_set_cookies(set_cookies or []),
+                   _xhr_set_cookies(xhr_headers)):
+        for pair in source.split(";"):
+            pair = pair.strip()
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                if v and not v.lower() == "deleted":
+                    parts.setdefault(k.strip(), v.strip())
+    site_cookie = "; ".join(f"{k}={v}" for k, v in parts.items())
 
     db.append_log(sk, ak, "oauth", {"step": "done", "hasToken": bool(creds["token"]),
                                     "hasCookie": bool(site_cookie),
@@ -407,6 +421,20 @@ def _finish_auth(sk: str, ak: str, site: dict, account: dict, creds: dict,
         site_user_id=creds["site_user_id"],
         github_login=creds["github_login"], github_id=creds["github_id"],
     )
+
+
+def _xhr_set_cookies(xhr_headers: Any) -> str:
+    """从 capture_xhr 响应头抓 Set-Cookie(失败返回空串)。"""
+    if xhr_headers is None:
+        return ""
+    try:
+        get_list = getattr(xhr_headers, "get_list", None)
+        if callable(get_list):
+            return parse_set_cookies(list(get_list("set-cookie") or []))
+        single = xhr_headers.get("set-cookie")
+        return parse_set_cookies([single] if isinstance(single, str) else list(single or []))
+    except Exception:
+        return ""
 
 
 # ---------- AuthFill(契约 §3.0 选择器,逐一平移 AuthFillJs) ----------

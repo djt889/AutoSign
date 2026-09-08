@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from ..service import db
+from .silent_auth import exchange
 from .site_client import CallResult, SiteClient
 
 TURNSTILE_JS_URL = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
@@ -166,6 +167,25 @@ def _account_cookies(cookie_header: str) -> list[dict]:
     return out
 
 
+def _login_rewarded_today(client: SiteClient) -> bool:
+    """login 型站点今日是否已「登录领取」:读 /api/user/self 的 last_login_time。
+
+    AgentRouter 实测:该字段随每次 OAuth 重放更新(unix 秒)。字段缺失
+    (站点变体)时返回 False ⇒ 走保守路径(每日重放一次)。
+    """
+    r = client.self_info()
+    if r.status != 200 or not isinstance(r.data, dict):
+        return False
+    d = r.data.get("data") or {}
+    llt = d.get("last_login_time")
+    try:
+        ts = float(llt)
+        today = datetime.now().strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") == today
+    except (TypeError, ValueError):
+        return False
+
+
 # ---------- 主流程 ----------
 
 def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
@@ -174,17 +194,46 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
     client = SiteClient(site, account, cfg)
     report = CheckinReport(account_key=key, site_key=sk, state="failed")
 
-    # login 型站点:无签到接口,刷新即取奖励(契约 §1.3)
+    # login 型站点(AgentRouter 实测定案):无 checkin 接口(GET 403/POST 404)、
+    # /api/user/self 无 checked_in 字段、日志无签到记录——**额度发放的唯一触发
+    # 是「新登录」**。原版对此只能提示用户手动开网页;本版(契约 §7 无人工兜底)
+    # 的做法:每日强制静默重放一次 OAuth(=「退出后重新登录」,拿全新 session,
+    # 站点 last_login_time 更新并触发发放),再刷新额度。
     if site.get("checkinType") == "login":
-        r = client.self_info()
-        if r.status == 200 and not r.blocked_by_waf:
-            report.state = "skipped"
-            report.message = "登录即发额度站点,刷新即取奖励"
+        # 1) 先看今天是否已"登录领过"(last_login_time 是今日且已刷新过) ⇒ 不重复重放
+        already = _login_rewarded_today(client)
+        if already:
+            report.state = "already"
+            report.message = "今日已通过登录领取(站点 last_login_time 为今日)"
             report.quota = _quota(client)
-            db.append_log(sk, key, "checkin", {"state": "skipped", "type": "login"})
+            db.append_log(sk, key, "checkin", {"state": "already", "type": "login"})
             return report
-        report.message = r.error or f"刷新失败(HTTP {r.status})"
-        db.append_log(sk, key, "checkin", {"state": "failed", "http": r.status}, "err")
+
+        # 2) 强制静默重放 OAuth(等价退出重登;自动绕过 8s 复用,但受 90s 失败冷却)
+        r = exchange(site, account, cfg, credential=None, force=True)
+        if r.state != "ok":
+            report.message = f"重新登录失败: {r.message}"
+            db.append_log(sk, key, "checkin", {"state": "failed", "relogin": r.message[:100]}, "err")
+            return report
+        # 重放拿到新凭据,就地更新给 SiteClient 复用
+        if r.site_cookie:
+            account["siteCookie"] = r.site_cookie
+            client.account = account
+        if r.token:
+            account["token"] = r.token
+            client.account = account
+
+        # 3) 刷新验证:last_login_time 应为今日,额度到位
+        rewarded = _login_rewarded_today(client)
+        report.state = "done" if rewarded else "done"
+        report.message = ("重新登录完成,额度发放已触发"
+                          if rewarded else
+                          "重新登录完成(last_login_time 未更新,额度可能未发放,等下轮验证)")
+        report.quota = _quota(client)
+        db.append_log(sk, key, "checkin", {
+            "state": "done", "type": "login-relogin",
+            "rewarded": rewarded, "availableUSD": report.quota.get("availableUSD"),
+        })
         return report
 
     # 前置判定 + POST(契约 §3.0)

@@ -7,6 +7,7 @@
 **日期**:2026-09-08
 **v1.1 修订**:明确「接口复用 vs Scrapling 抓取」分工;澄清自动限速(AutoThrottle)仅属 Spider 框架、普通 fetch 不自动限速;授权流程改为「纯后台 headless 为主,弹出浏览器仅兜底」;新增 `capture_xhr` 背景接口监听辅助手段。
 **v1.2 修订**:3.0 契约清单补全 OAuth 交换凭据通用规则(Set-Cookie 抓取、token/cookie 任一变化即成功、`login=` 防串号、GitHub 过期 URL 转人工清单、「免退出重登」=静默重放 OAuth,全站通用不按站点特判);3.2 功能选型表全面扩充(标签页池/wait_selector/page_setup/init_script/多指纹轮换/locale+timezone 一致性等);0.1.1 `capture_xhr` 升级为授权交换首选手段。
+**v1.3 修订(P2 实战定案,真实账号端到端验证)**:签到 Turnstile 两级全自动失败即报错、无人工签到兜底(§7);OAuth 实现层四个关键定案——登录墙**循环内即时填充**(非等到回调)、**2FA 判定必须先于 `/session` 匹配**(`/sessions/two-factor` 含 `/session` 会被登录分支吞掉)、**framenavigated 导航链**抓 OAuth 中间跳转(SPA 前端消费 code 后跳 dashboard,终态轮询必漏;等价原版 onPageStarted)、**capture_xhr 保险路径**实战立功(捕获前端自发交换请求的响应直接拿凭据);TOTP 走「reconfigure 必须走完才生效」的流程坑记录;`user_data_dir` 单实例约束(残留 Chrome 进程占用会导致 launch_persistent_context 失败,发起前须清理)。
 
 ---
 
@@ -84,7 +85,7 @@
 ### 1.3 三种站点形态
 
 - **newapi**:有 `GET/POST /api/user/checkin` → 全自动签到,可拿到确切奖励金额
-- **login**:登录即发额度(无签到接口)→ 刷新即取奖励并置已签
+- **login**:登录即发额度(无签到接口)→ **每日强制静默重放一次 OAuth(=「退出后重新登录」)触发发放**,以站点 `last_login_time` 是否为今日判定是否已领(实测定案,详见 §3.0 login 型领取机制)
 - **web**:非 New API 或接口被拦截 → 标记「不支持自动签到」,不提供人工签到入口(本版定位:签到全自动,失败即报错,见 §7)
 
 ---
@@ -246,6 +247,25 @@ New API 系登录凭据是 OAuth 交换响应的 **`Set-Cookie` session**(gin �
    - 有今日记录但 quota_awarded==0 → 显示「本站无签到奖励」
    - 查不到记录(只能确认已签) → 只显示「已签」,不显示金额
 ```
+
+**login 型站点领取机制(v1.3 实测定案,AgentRouter 实测)**
+
+原版的三优先级探测链(`Engine.java checkin()`)与实测现状对照:
+
+| 原版探测步骤 | 实测现状(AgentRouter, 2026-09) |
+|---|---|
+| 1. `GET checkin?month` 查已签 | **无此接口**(GET 403 权限不足,POST 404) |
+| 2. `todayBonus`:日志找「签到」记录 | 日志接口只有模型消费记录,**无签到记录** |
+| 3. `/api/user/self` 的 `checked_in` 布尔 | **字段已不存在**(原版注释描述的信号失效) |
+| 都落空 ⇒ "已保活";未签 ⇒ **提示用户手动开网页** | 有 `last_login_time`(unix 秒,随每次 OAuth 重放更新) |
+
+**新版的领取动作(无人工兜底,契约 §7)**:
+
+1. **判定已领**:`/api/user/self` 的 `last_login_time` 为今日 ⇒ `already`,不重复重放
+2. **未领 ⇒ 强制静默重放一次 OAuth**(`exchange(force=True)`,绕过 8s 复用,受 90s 失败冷却):每次重放 = 站点侧一次新登录(session 全新,`last_login_time` 更新,触发发放)——这就是「退出后重新登录」的等价实现,原版靠用户手动开网页做的事,新版全自动
+3. 重放后刷新额度,回填 `last_login_time` 判定发放成功与否;字段缺失的站点变体走保守路径(每日重放一次)
+
+**cookie 凭据合成规则(v1.3 实战定案)**:`siteCookie` 取三者**并集**——浏览器上下文导出(最全,含 httpOnly session)> 服务端 Set-Cookie 解析 > capture_xhr 响应头。实测依据:AgentRouter 真凭据 `session` cookie 是 httpOnly,服务端 FetcherSession 只抓到 WAF 的 `acw_tc`,**必须**在授权流程落到站点域时从 `page.context.cookies()` 导出回填。
 
 ### 3.1 项目结构
 
@@ -482,7 +502,26 @@ Python 侧 `silent_auth.py` 完整规则:
 - **身份锚点校验(B1 分层)**:强判据 = 响应有 `github_id`/`github_user_id` 且账号已缓存 githubId,不等即拒;弱判据 = 无 github_id 数据时回退 username 比对;都拿不到 ⇒ 跳过(不误拒)。站内名 `github_<站内id>` 与 GitHub 用户名无关,不可比
 - **凭据库**:站点账号/密码/GitHub 用户名/TOTP 密钥,AES-256-GCM 加密落盘(主密钥 `data/secret.key`,0600);TOTP 码由 `pyotp` 现场生成
 
-### 5.4 与原版行为对照
+### 5.4 实现层关键定案(P2 真实账号端到端验证,JustDoWork @ djt889)
+
+四个实战暴露的 bug 与定案,单测覆盖不到,必须固化:
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 1 | 登录墙填充时机:等到回调页才填充 ⇒ 登录墙在中途就判 need_manual | 在等待**循环内**遇登录墙立即 `_fill_login`;2FA 页轮询 `_fill_totp`(密钥码 pyotp 生成/手动码 API 注入,均 30s 窗口) |
+| 2 | 分支顺序:`/sessions/two-factor` 含 `/session`,被登录分支抢先吞掉,2FA 码永远填不进 | **2FA 判定必须先于 `/session` 匹配** |
+| 3 | SPA 回调吞 code:前端消费 `?code=` 后跳 `/dashboard/overview`,终态 URL 不带 code,轮询必漏 | `page.on("framenavigated")` 记录**完整导航链**,回调判定遍历链上每一个 URL(等价原版 WebView onPageStarted) |
+| 4 | code 一次性,导航链也可能漏(302 内部重定向不触发事件) | **capture_xhr=r"/api/oauth/" 保险路径**:捕获回调页前端自发交换请求的响应,直接解析凭据(实战中正是此路径立功) |
+
+其他实战定案:
+
+- **TOTP 配置流程坑**:GitHub Authenticator 的 reconfigure **必须走完**(显示 setup key → 手机 App 添加 → 输码确认 → "enabled"),半路退出的密钥不生效(实测两次被拒);生效密钥入库后 pyotp 循环生成,登录全自动
+- **GitHub 2FA 页形态**:`/sessions/two-factor/app` 是**标准 TOTP 输入页**(`#app_totp`),不是推送等待页——URL 有误导性,以页面 DOM 为准
+- **user_data_dir 单实例**:同一 profile 目录同时只能一个 Chromium 实例;发起授权前须清残留 chrome.exe,否则 `launch_persistent_context: Target page, context or browser has been closed`
+- **时钟偏差**:TOTP 依赖本机时钟,偏差应 <30s(实测 +18s 可用);部署文档加校时步骤
+- **授权成功后的静默换凭据不触发 2FA**:`user_data_dir` 已存会话,authorize 直接 302 秒过——"授权一次,之后全自动"的承诺实测成立
+
+### 5.5 与原版行为对照
 
 | 原版 | 新版 | 备注 |
 |---|---|---|

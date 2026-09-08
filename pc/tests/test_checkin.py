@@ -63,17 +63,71 @@ def test_already_shows_award(tmp_path, monkeypatch):
     assert rep.state == "already" and rep.awarded == 28.0
 
 
-def test_login_type_refresh(tmp_path, monkeypatch):
-    """login 型:不打签到接口,刷新即取奖励。"""
+def test_login_type_already_today(tmp_path, monkeypatch):
+    """login 型:last_login_time 为今日 ⇒ already,不重放 OAuth。"""
+    import datetime as dt
     site, acc, cfg = make("login")
     patch_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(ck.SiteClient, "self_info",
-                        lambda self: type("R", (), {"status": 200, "blocked_by_waf": False,
-                                                    "data": {"data": {"quota": 2500000, "used_quota": 0}}})())
+    class R:
+        status = 200
+        blocked_by_waf = False
+        data = {"data": {"quota": 2500000, "used_quota": 0,
+                         "last_login_time": dt.datetime.now().timestamp()}}
+    monkeypatch.setattr(ck.SiteClient, "self_info", lambda self: R())
     rep = ck.run_checkin(site, acc, cfg)
-    assert rep.state == "skipped"
-    assert "登录即发额度" in rep.message
+    assert rep.state == "already"
+    assert "登录领取" in rep.message
     assert rep.quota["availableUSD"] == 5.0
+
+
+def test_login_type_relogin_for_reward(tmp_path, monkeypatch):
+    """login 型:今日未领 ⇒ 强制静默重放 OAuth(退出重登)→ done + 额度刷新。"""
+    import datetime as dt
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+
+    # 第一次 self:last_login_time 是昨天(未领)
+    old = {"data": {"quota": 2500000, "used_quota": 0,
+                    "last_login_time": (dt.datetime.now() - dt.timedelta(days=1)).timestamp()}}
+    fresh = {"data": {"quota": 2750000, "used_quota": 0,
+                      "last_login_time": dt.datetime.now().timestamp()}}
+    seq = {"n": 0}
+    class R:
+        def __init__(self):
+            self.status = 200
+            self.blocked_by_waf = False
+            self.data = fresh if seq["n"] > 1 else old
+    def fake_self(self):
+        seq["n"] += 1
+        return R()
+    monkeypatch.setattr(ck.SiteClient, "self_info", fake_self)
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("ok", "授权成功", token="t",
+                                                   site_cookie="session=new"))
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "done"
+    assert "重新登录完成" in rep.message
+    assert acc["siteCookie"] == "session=new"      # 新凭据就地更新
+    assert rep.quota["availableUSD"] == 5.5        # 刷新后的额度
+
+
+def test_login_type_relogin_fail(tmp_path, monkeypatch):
+    """login 型:重放失败 ⇒ failed 报错(无人工兜底)。"""
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    db = patch_db(tmp_path, monkeypatch)
+    class R:
+        status = 401
+        blocked_by_waf = False
+        data = {}
+    monkeypatch.setattr(ck.SiteClient, "self_info", lambda self: R())
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("failed", "GitHub 会话过期"))
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "failed"
+    assert "重新登录失败" in rep.message
+    assert any(l["event"] == "checkin" and l.get("level") == "err" for l in db.recent_logs(5))
 
 
 def test_level1_widget_passes(tmp_path, monkeypatch):
