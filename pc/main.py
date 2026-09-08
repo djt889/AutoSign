@@ -144,6 +144,8 @@ def checkin(account_key: str):
         raise HTTPException(404, "账号不存在")
     site, acc = found
     report = run_checkin(site, acc, cfg)
+    # 签到后额度已变化:清除该账号 status 缓存,接下来的刷新必然打站点拿新值
+    _status_cache.pop(account_key, None)
     return report.to_dict()
 
 

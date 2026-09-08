@@ -182,6 +182,34 @@ function busy(on,what){const b=$('#busy');b.style.display=on?'flex':'none';if(wh
 async function post(p,b){return api(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b||{})})}
 function authed(a){return !!(a.token||a.siteCookie)}
 function siteOf(k){return(CFG?.sites||[]).find(s=>s.key===k)}
+/* 今日已签(原版 Engine.isCheckedToday 同语义:localStorage 优先,落盘兜底) */
+function checkedToday(a){
+  try{
+    const key='ck_'+a.key;
+    const wb=localStorage.getItem(key);
+    if(wb){const o=JSON.parse(wb);if(o&&o.d===todayStr())return o;}
+  }catch(_){}
+  const lc=a.lastCheckin;
+  if(lc&&lc.date===todayStr())return lc;
+  return null;
+}
+function todayStr(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function markCheckedToday(k,state,reward){
+  try{localStorage.setItem('ck_'+k,JSON.stringify({d:todayStr(),state:state||'done',reward:reward??null}))}catch(_){}
+}
+/* 额度状态内存(解决用户 bug1:重渲染不再清空已有额度;与 DOM 双写) */
+const QUOTA={};
+function setQuota(k,quota){
+  // quota: {availableUSD,usedUSD,todayUsedUSD}
+  if(quota&&typeof quota==='object')QUOTA[k]=quota;
+  paintQuota(k,QUOTA[k]||{});
+}
+function paintQuota(k,q){
+  document.querySelectorAll(`[data-q="${k}"]`).forEach(e=>{if(q.availableUSD!=null){e.textContent='$'+USD(q.availableUSD);e.dataset.usd=q.availableUSD;}});
+  document.querySelectorAll(`[data-tu="${k}"]`).forEach(e=>e.textContent=q.todayUsedUSD!=null?'今日消耗 $'+USD(q.todayUsedUSD):'今日消耗 -');
+  document.querySelectorAll(`[data-uu="${k}"]`).forEach(e=>e.textContent=q.usedUSD!=null?'累计已用 $'+USD(q.usedUSD):'累计已用 -');
+  updateTotal();updateSiteSums();
+}
 
 /* ===== 数据:打开页面拉一次(10分钟缓存内秒回),其余靠「刷新」按钮 ===== */
 async function refresh(){
@@ -194,10 +222,7 @@ async function refresh(){
 async function loadStatus(key,force){
   const r=await api('/status/'+key+(force?'?force=1':''));
   if(!r.ok){if(force)toast(r.detail||'额度获取失败');return r;}
-  document.querySelectorAll(`[data-q="${key}"]`).forEach(e=>{e.textContent='$'+USD(r.availableUSD);e.dataset.usd=r.availableUSD;});
-  document.querySelectorAll(`[data-tu="${key}"]`).forEach(e=>e.textContent=r.todayUsed!=null?'今日消耗 $'+USD(r.todayUsed):'今日消耗 -');
-  document.querySelectorAll(`[data-uu="${key}"]`).forEach(e=>e.textContent='累计已用 $'+USD(r.usedUSD));
-  updateTotal();updateSiteSums();return r;
+  setQuota(key,{availableUSD:r.availableUSD,usedUSD:r.usedUSD,todayUsedUSD:r.todayUsed});return r;
 }
 function updateTotal(){
   let t=0;TKS.forEach(x=>{const e=document.querySelector(`[data-q="${x.key}"]`);if(e&&e.dataset.usd)t+=+e.dataset.usd;});
@@ -228,15 +253,18 @@ function render(){
 function accRow(s,a){
   const k=a.key,au=authed(a),gh=a.githubAccount?'@'+a.githubAccount:'';
   const lg=s.checkinType==='login';
+  const ck=au?checkedToday(a):null;
   const act=!au?`<button class="btn r sm" onclick="openAuth('${k}','auto')">去授权</button>`
+    :ck?`<span class="pill g">✓ 已签</span>`
     :lg?`<span class="pill g">✓ 已授权</span>`
     :`<button class="btn b sm" onclick="doCheckin('${k}')">签到</button>`;
+  const rew=rewardPill(a);
   return `<div class="acc-box">
     <div class="acc-r1"><div class="acc-ident">${esc(a.alias||k)}${gh?`<span class="gh">${esc(gh)}</span>`:''}
       <span class="acc-log" onclick="openLogs('${k}')">日志 ›</span></div>
       <div class="ops">${au?'':`<span class="pill o">待授权</span>`}${act}
         <span style="color:var(--sub2);cursor:pointer;font-weight:900;padding:2px 6px" onclick="accMenu('${k}')">⋯</span></div></div>
-    <div class="acc-r2"><span class="bl">可用余额</span><span class="bal" data-q="${k}">-</span>${rewardPill(a)}</div>
+    <div class="acc-r2"><span class="bl">可用余额</span><span class="bal" data-q="${k}">-</span>${rew}</div>
     <div class="acc-r3"><span data-tu="${k}">今日消耗 -</span><span style="margin:0 10px" data-uu="${k}">累计已用 -</span>
       <span class="lnk" onclick="loadStatus('${k}',true)">刷新额度</span></div></div>`;
 }
@@ -257,6 +285,8 @@ function renderBoard(){
         :`<div class="hint" style="margin-top:8px">暂无账号 · <span style="color:var(--blue);cursor:pointer" onclick="addAccSheet('${s.key}')">添加账号</span></div>`}
     </div>`;
   }).join('');
+  // 重渲染后把内存里的额度/今日/累计回填回去(防重渲染清空)
+  for(const k of Object.keys(QUOTA))paintQuota(k,QUOTA[k]);
 }
 /* ===== 设置页(同一套) ===== */
 function renderSettings(){
@@ -294,9 +324,52 @@ function showPage(p){
 /* 侧栏导航点击(桌面) */
 document.querySelectorAll('#side .nav').forEach(n=>n.onclick=()=>showPage(+n.dataset.nav));
 /* ===== 动作 ===== */
-async function doCheckin(k){busy(true,'签到中(两级人机验证全自动)…');const r=await post('/checkin/'+k);busy(false);toast(r.message||JSON.stringify(r));render();}
-async function bulkCheckin(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键签到全部…');let n=0;for(const t of ts){const r=await post('/checkin/'+t.key);if(r.ok||r.state==='already')n++;}busy(false);toast(`一键签到 ${n}/${ts.length} 成功`);render();}
-async function bulkRefresh(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键刷新额度…');for(const t of ts)await loadStatus(t.key,true);busy(false);toast('✅ 刷新完成');}
+const checking=new Set();   // 防重复点击:同一账号签到中不再发请求
+async function doCheckin(k){
+  const t=TKS.find(x=>x.key===k);
+  if(checking.has(k)){toast('该账号正在签到中…');return;}
+  const ck=t?checkedToday(t):null;
+  if(ck&&ck.state!=='todo'){toast('今日已签到,无需重复操作');return;}
+  checking.add(k);
+  busy(true,'签到中(两级人机验证全自动)…');
+  try{
+    const r=await post('/checkin/'+k);
+    toast(r.message||JSON.stringify(r));
+    if(r.ok&&(r.state==='done'||r.state==='already')){
+      markCheckedToday(k,r.state,r.awarded);
+      const tt=TKS.find(x=>x.key===k);
+      if(tt)tt.lastCheckin={date:todayStr(),state:r.state,reward:r.awarded};
+    }
+    // 用签到返回的 quota 直接更新额度(不依赖 status 缓存,额度不消失)
+    if(r.quota&&(r.quota.availableUSD!=null))setQuota(k,r.quota);
+    render();
+    if(r.ok&&(r.state==='done'||r.state==='already')){
+      const el=document.querySelector(`[data-q="${k}"]`);
+      if(el)loadStatus(k,true);
+    }
+  }finally{checking.delete(k);busy(false);}
+}
+async function bulkCheckin(){
+  const ts=TKS.filter(authed).filter(t=>{const c=checkedToday(t);return !c;});
+  if(!ts.length){toast('没有待签到的已授权账号(均已签)');return;}
+  busy(true,`一键签到 ${ts.length} 个…`);
+  // 并发跑(每账号 1 个请求,后端自带串行锁;失败不阻断)
+  const rs=await Promise.all(ts.map(t=>post('/checkin/'+t.key).then(r=>({k:t.key,r}))
+    .catch(e=>({k:t.key,r:{ok:false,message:String(e)}}))));
+  let n=0;
+  for(const{k,r}of rs){
+    if(r.ok&&(r.state==='done'||r.state==='already')){
+      n++;markCheckedToday(k,r.state,r.awarded);
+      const tt=TKS.find(x=>x.key===k);if(tt)tt.lastCheckin={date:todayStr(),state:r.state,reward:r.awarded};
+      if(r.quota&&r.quota.availableUSD!=null)setQuota(k,r.quota);
+    }
+  }
+  busy(false);toast(`一键签到完成 ${n}/${ts.length} 成功`);
+  render();
+  // 已签/刚签的账号强制刷一次额度(绕缓存,后端签到已清缓存)
+  for(const{k,r}of rs)if(r.ok)await loadStatus(k,true);
+}
+async function bulkRefresh(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键刷新额度…');await Promise.all(ts.map(t=>loadStatus(t.key,true)));busy(false);toast('✅ 刷新完成');}
 async function delAccount(k){confirmDlg('删除账号','确认删除该账号?',async()=>{await api('/accounts/'+k,{method:'DELETE'});toast('已删除');refresh();});}
 function accMenu(k){openSheet('账号操作',`<div class="menu-item" onclick="closeSheet();openAuth('${k}','auto')"><span class="ic">🔑</span>全自动授权(headless)</div>
   <div class="menu-item" onclick="closeSheet();openAuth('${k}','manual')"><span class="ic">🖥️</span>手动登录授权(弹浏览器,不存密码)</div>

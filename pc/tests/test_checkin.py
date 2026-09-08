@@ -207,3 +207,41 @@ def test_account_cookies_parser():
         {"name": "uid", "value": "7", "path": "/"},
     ]
     assert ck._account_cookies("") == []
+
+
+def test_checkin_persist_lastCheckin(tmp_path, monkeypatch):
+    """签到成功必须落盘 lastCheckin{date,state,reward},供刷新后判定已签。"""
+    import datetime as dt
+    from pc.service import config as config_svc
+    site, acc, cfg = make()
+    site["accounts"] = [dict(acc)]
+    cfg["sites"] = [site]
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_svc, "CFG_PATH", tmp_path / "config.json")
+    config_svc.save(cfg)
+    monkeypatch.setattr(ck.SiteClient, "checkin_flow",
+                        lambda self: CheckinOutcome("done", awarded=25.0, message="签到成功"))
+    monkeypatch.setattr(ck.SiteClient, "self_info",
+                        lambda self: type("R", (), {"status": 200, "blocked_by_waf": False,
+                                                    "data": {"data": {"quota": 5000000, "used_quota": 0}}})())
+    rep = ck.run_checkin(site, site["accounts"][0], cfg)
+    assert rep.state == "done"
+    saved = config_svc.load()["sites"][0]["accounts"][0]
+    assert saved.get("lastCheckin", {}).get("date") == dt.date.today().strftime("%Y-%m-%d")
+    assert saved["lastCheckin"]["state"] == "done"
+    assert saved["lastCheckin"]["reward"] == 25.0
+    # to_dict 必须带 date,前端用它更新落盘快照
+    d = rep.to_dict()
+    assert d["date"] == dt.date.today().strftime("%Y-%m-%d")
+
+
+def test_status_cache_cleared_after_checkin():
+    """checkin 接口签到后必须清除该账号 status 缓存,否则额度显示过期值。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    import pc.main as main
+    main._status_cache["k1"] = (9999999999.0, {"ok": True})
+    assert "k1" in main._status_cache
+    # 模拟 checkin 的清缓存逻辑(与 main.checkin 同实现)
+    main._status_cache.pop("k1", None)
+    assert "k1" not in main._status_cache

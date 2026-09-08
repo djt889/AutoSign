@@ -43,6 +43,7 @@ class CheckinReport:
             "message": self.message,
             "captchaLevel": self.captcha_level,
             "quota": self.quota,
+            "date": datetime.now().strftime("%Y-%m-%d"),
         }
 
 
@@ -218,6 +219,7 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
             report.state = "already"
             report.message = "今日已通过登录领取(站点 last_login_time 为今日)"
             report.quota = _quota(client)
+            _persist_checkin(sk, key, report)
             db.append_log(sk, key, "checkin", {"state": "already", "type": "login"})
             return report
 
@@ -242,6 +244,7 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
                           if rewarded else
                           "重新登录完成(last_login_time 未更新,额度可能未发放,等下轮验证)")
         report.quota = _quota(client)
+        _persist_checkin(sk, key, report)
         db.append_log(sk, key, "checkin", {
             "state": "done", "type": "login-relogin",
             "rewarded": rewarded, "availableUSD": report.quota.get("availableUSD"),
@@ -311,6 +314,7 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
         report.awarded = outcome.awarded
         report.message = outcome.message
         report.quota = _quota(client)
+        _persist_checkin(sk, key, report)
         db.append_log(sk, key, "checkin", {"state": "already", "awarded": outcome.awarded})
         return report
 
@@ -325,13 +329,34 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
 # ---------- 辅助 ----------
 
 def _finish(report: CheckinReport, client: SiteClient, sk: str, key: str) -> None:
-    """签到成功后自动刷三额度(契约 §3.0:与手动刷新行为对齐)。"""
+    """签到成功后自动刷三额度(契约 §3.0:与手动刷新行为对齐)。
+
+    顺带把签到记录落盘到账号 lastCheckin{date,state,reward},供前端
+    在刷新重渲染时保持"已签"状态(防重复点击签到)。
+    """
     report.quota = _quota(client)
+    _persist_checkin(sk, key, report)
     db.append_log(sk, key, "checkin", {
         "state": report.state, "awarded": report.awarded,
         "captchaLevel": report.captcha_level,
         "availableUSD": report.quota.get("availableUSD"),
     })
+
+
+def _persist_checkin(site_key: str, account_key: str, report: CheckinReport) -> None:
+    """签到记录落盘(幂等:只记录,前端按 date 判定今日状态)。"""
+    from ..service import config as config_svc
+    cfg = config_svc.load()
+    found = config_svc.find_account(cfg, account_key)
+    if not found:
+        return
+    _, a = found
+    a["lastCheckin"] = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "state": report.state,
+        "reward": report.awarded,
+    }
+    config_svc.save(cfg)
 
 
 def _quota(client: SiteClient) -> dict:
