@@ -3,32 +3,36 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AutoSign · 公益AI中转站自动签到</title>
+<title>公益AI中转站 · 自动签到台</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1220;color:#e6e8f0;display:flex;height:100vh;overflow:hidden}
 #app{display:flex;width:100%}
-.side{width:190px;background:#161a2e;padding:18px 10px;display:flex;flex-direction:column;gap:6px;border-right:1px solid #252a45}
+/* 侧栏 */
+.side{width:180px;background:#161a2e;padding:18px 10px;display:flex;flex-direction:column;gap:6px;border-right:1px solid #252a45}
 .side .logo{font-size:16px;font-weight:700;color:#8ab4ff;margin:0 8px 14px}
 .tab{padding:9px 12px;border-radius:10px;cursor:pointer;font-size:13px;color:#9aa3bf;display:flex;gap:8px;align-items:center}
 .tab.on{background:#1f2550;color:#fff}
 .tab:hover{color:#fff}
+/* 主区 */
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .top{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;border-bottom:1px solid #252a45}
 .top h2{font-size:17px}
-.badge{font-size:12px;background:#1f2550;padding:4px 10px;border-radius:10px;color:#8ab4ff;margin-left:8px}
+.badge{font-size:12px;background:#1f2550;padding:4px 10px;border-radius:10px;color:#8ab4ff}
 .body{flex:1;padding:20px 24px;overflow-y:auto}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:18px}
+/* 卡片 */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-bottom:18px}
 .card{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
 .card .lbl{font-size:12px;color:#8a90b8}
 .card .val{font-size:22px;font-weight:700;margin-top:4px}
 .ok{color:#6bdf85}.warn{color:#ffc857}.err{color:#ff7a7a}
-.matrix{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px;margin-bottom:18px}
+/* 矩阵 */
+.matrix{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
 .matrix h3{font-size:14px;color:#8a90b8;margin-bottom:10px;font-weight:600}
 .row{display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid #202445;font-size:13px}
 .row:last-child{border:none}
-.chip{padding:3px 8px;border-radius:6px;font-size:11px;white-space:nowrap}
-.chip.a{background:#1f3a1f;color:#6bdf85}.chip.b{background:#3a2f1f;color:#ffc857}.chip.c{background:#3a1f1f;color:#ff7a7a}.chip.d{background:#1f2540;color:#8ab4ff}
+.chip{padding:3px 8px;border-radius:6px;font-size:11px}
+.chip.a{background:#1f3a1f;color:#6bdf85}.chip.b{background:#3a2f1f;color:#ffc857}.chip.c{background:#3a1f1f;color:#ff7a7a}
 .btn{padding:6px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;background:#2a3168;color:#fff}
 .btn:hover{background:#3a4388}
 .btn.sm{padding:4px 9px;font-size:11px}
@@ -36,93 +40,99 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 textarea,input,select{background:#0f1220;border:1px solid #252a45;color:#e6e8f0;padding:7px 10px;border-radius:8px;font-size:13px;width:100%}
 form .f{margin-bottom:10px}
 form label{display:block;font-size:12px;color:#8a90b8;margin-bottom:4px}
-.log{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#0c0e1a;border:1px solid #252a45;border-radius:10px;padding:12px;max-height:420px;overflow-y:auto;line-height:1.6}
-.log .t{color:#8a90b8}.log .e{color:#8ab4ff}.log .err{color:#ff7a7a}
+.log{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#0c0e1a;border:1px solid #252a45;border-radius:10px;padding:12px;max-height:400px;overflow-y:auto;line-height:1.6}
+.log .t{color:#8a90b8}.log .e{color:#8ab4ff}
 .hidden{display:none}
-.muted{color:#8a90b8;font-size:12px}
-.authpanel{background:#1a2040;border:1px solid #2a3a70;border-radius:10px;padding:14px;margin:12px 0}
-.oauth-status{margin-top:10px;padding:10px;background:#0c0e1a;border-radius:8px;font-size:13px}
-.spin{display:inline-block;width:12px;height:12px;border:2px solid #8ab4ff;border-top-color:transparent;border-radius:50%;animation:sp 1s linear infinite;margin-right:6px;vertical-align:-1px}
-@keyframes sp{to{transform:rotate(360deg)}}
+.authstat{margin-top:8px;padding:8px 10px;background:#0c0e1a;border-radius:8px;font-size:12px}
 </style>
 </head>
 <body>
 <div id="app">
   <div class="side">
-    <div class="logo">🎓 AutoSign</div>
+    <div class="logo">🎓 justsign</div>
     <div class="tab on" data-tab="home">📊 首页总览</div>
     <div class="tab" data-tab="accounts">👤 账号</div>
     <div class="tab" data-tab="sites">🌐 站点</div>
-    <div class="tab" data-tab="settings">⚙️ 设置</div>
+    <div class="tab" data-tab="logs">📝 日志 & 设置</div>
+    <div class="tab" data-tab="settings">⚙️ 引擎设置</div>
   </div>
   <div class="main">
     <div class="top"><h2 id="title">首页总览</h2>
-      <div><span class="badge" id="schBadge">调度: 检测中</span><span class="badge" id="accBadge">账号: -</span></div>
+      <div><button class="btn sm" id="btnRefreshAll">🔄 刷新全部余额</button> <span class="badge" id="proxyBadge">代理: 检测中</span> <span class="badge" id="schBadge">调度: 关</span></div>
     </div>
 
     <!-- HOME -->
     <div class="body" id="tab-home">
       <div class="grid">
-        <div class="card"><div class="lbl">站点数</div><div class="val" id="sumSite">-</div></div>
-        <div class="card"><div class="lbl">账号数</div><div class="val" id="sumAcc">-</div></div>
-        <div class="card"><div class="lbl">总可用额度 (USD)</div><div class="val ok" id="sumQuota">-</div></div>
+        <div class="card"><div class="lbl">账号总数</div><div class="val" id="sumAc">-</div></div>
+        <div class="card"><div class="lbl">站点总数</div><div class="val" id="sumSite">-</div></div>
+        <div class="card"><div class="lbl">已登录</div><div class="val ok" id="sumLogin">-</div></div>
       </div>
-      <div class="matrix"><h3>账号看板</h3><div id="matrix">加载中…</div></div>
-      <div class="matrix"><h3>实时日志(SSE)</h3><div class="log" id="liveLog"></div></div>
+      <div class="grid" id="quotaGrid"></div>
+      <div class="matrix">
+        <h3>账号 × 站点 登录状态矩阵</h3>
+        <div id="matrix"></div>
+      </div>
     </div>
 
     <!-- ACCOUNTS -->
     <div class="body hidden" id="tab-accounts">
-      <div class="matrix">
-        <h3>添加账号(先选站点)</h3>
-        <form id="addAccForm" style="max-width:420px">
-          <div class="f"><label>站点</label><select id="accSite"></select></div>
-          <div class="f"><label>别名</label><input id="accAlias" placeholder="主号"></div>
-          <button class="btn" type="submit">添加账号</button>
+        <div class="matrix">
+        <h3>添加账号（GitHub 账号 + 站点）</h3>
+        <div id="authPanel" style="display:block;margin-bottom:12px;padding:10px;background:#1f2550;border-radius:10px;font-size:13px">
+          <span id="authEnv">🐍 Python 引擎(Scrapling)</span> 内置授权:
+          <button class="btn" id="btnAuth" style="margin-left:6px">🔑 全自动授权(headless)</button>
+          <button class="btn warn" id="btnAuthManual" style="margin-left:6px">🖥️ 手动登录授权(弹浏览器)</button>
+          <span class="lbl" style="margin-left:8px">全自动=凭据库填账密/2FA 一键完成;手动=自己输密码(不存密码,仅存会话)</span>
+          <div class="authstat hidden" id="authStat"></div>
+        </div>
+        <form id="addForm">
+          <div class="f"><label>账号别名</label><input id="aKey" placeholder="gh1"></div>
+          <div class="f"><label>GitHub 账号名</label><input id="aGh" placeholder="AI模型API"></div>
+          <div class="f"><label>绑定站点</label><select id="aSite"></select></div>
+          <div class="f"><label>access_token（用真实浏览器授权一次后粘贴,可留空走授权）</label><input id="aToken" placeholder="Bearer 后的 access_token"></div>
+          <button class="btn" type="submit">保存账号</button>
         </form>
       </div>
-      <div class="matrix"><h3>账号管理</h3><div id="accList">加载中…</div></div>
+      <div class="matrix"><h3>已存账号</h3><div id="matrix2"></div></div>
     </div>
 
     <!-- SITES -->
     <div class="body hidden" id="tab-sites">
+      <div class="grid" id="siteGrid"></div>
       <div class="matrix">
         <h3>添加站点</h3>
-        <form id="addSiteForm" style="max-width:480px">
-          <div class="f"><label>名称</label><input id="siteName" placeholder="MyAPI"></div>
-          <div class="f"><label>API 地址</label><input id="siteUrl" placeholder="https://example.com"></div>
-          <div class="f"><label>形态</label>
-            <select id="siteType">
-              <option value="newapi">newapi(有签到接口,全自动)</option>
-              <option value="login">login(登录即发额度,每日重登领取)</option>
-            </select></div>
+        <form id="siteForm" style="max-width:480px">
+          <div class="f"><label>名称</label><input id="sName" placeholder="MyAPI"></div>
+          <div class="f"><label>API 地址</label><input id="sUrl" placeholder="https://example.com"></div>
+          <div class="f"><label>形态</label><select id="sType"><option value="newapi">newapi(有签到接口)</option><option value="login">login(登录即发额度,每日重登领取)</option></select></div>
           <button class="btn" type="submit">添加站点</button>
-          <span class="muted" style="margin-left:10px">或</span>
-          <button class="btn" type="button" id="btnSetup">载入内置四站</button>
+          <button class="btn" type="button" id="btnSetup" style="margin-left:8px">载入内置四站</button>
         </form>
       </div>
-      <div class="matrix"><h3>站点列表</h3><div id="siteList">加载中…</div></div>
+    </div>
+
+    <!-- LOGS -->
+    <div class="body hidden" id="tab-logs">
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <select id="logAc" style="width:160px"><option value="">— 选择账号 —</option></select>
+        <button class="btn" id="btnLogs">查看使用日志(系统)</button>
+        <button class="btn" id="btnHist">查看本地运行日志</button>
+      </div>
+      <div class="log" id="logBox">暂无日志。先添加账号并粘贴 access_token。</div>
     </div>
 
     <!-- SETTINGS -->
     <div class="body hidden" id="tab-settings">
       <div class="matrix">
-        <h3>定时调度</h3>
-        <form id="schForm" style="max-width:480px">
-          <div class="f"><label><input type="checkbox" id="schOn" style="width:auto"> 启用每日自动签到</label></div>
-          <div class="f"><label>时间(每天, Asia/Shanghai)</label><input id="schTime" type="time" value="09:05"></div>
-          <button class="btn" type="submit">保存调度</button>
-          <button class="btn warn" type="button" id="btnRunNow" style="margin-left:8px">立即跑一轮</button>
-        </form>
-        <div class="muted" style="margin-top:8px">调度动作:newapi 型走签到流程;login 型强制静默重登领取;全部串行 + 防风暴。</div>
-      </div>
-      <div class="matrix">
-        <h3>代理(socks5)</h3>
-        <form id="proxyForm" style="max-width:480px">
-          <div class="f"><label><input type="checkbox" id="pxOn" style="width:auto"> 启用代理</label></div>
-          <div class="f"><label>地址</label><input id="pxHost" value="127.0.0.1"></div>
-          <div class="f"><label>端口</label><input id="pxPort" type="number" value="10808"></div>
-          <button class="btn" type="submit">保存代理</button>
+        <h3>引擎设置</h3>
+        <form id="setForm">
+          <div class="f"><label>SOCKS5 代理 主机</label><input id="sHost"></div>
+          <div class="f"><label>SOCKS5 代理 端口</label><input id="sPort"></div>
+          <div class="f"><label><input type="checkbox" id="sSchOn" style="width:auto"> 启用定时签到(每天此时刻, Asia/Shanghai)</label></div>
+          <div class="f"><label>定时签到时刻</label><input id="sCron" type="time" value="09:05"></div>
+          <button class="btn" type="submit">保存</button>
+          <button class="btn warn" type="button" id="btnRunNow" style="margin-left:8px">立即跑一轮全部账号</button>
         </form>
       </div>
     </div>
@@ -130,217 +140,195 @@ form label{display:block;font-size:12px;color:#8a90b8;margin-bottom:4px}
 </div>
 
 <script>
+const BASE = '/api';
 const $ = s => document.querySelector(s);
-const api = (p, opt) => fetch(p, opt).then(r => r.json().catch(() => ({})));
-const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
-const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let CFG = null, TKS = [];
 
-/* ---------- tab 切换 ---------- */
-document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
-  document.querySelectorAll('.body').forEach(b => b.classList.add('hidden'));
-  $('#tab-' + t.dataset.tab).classList.remove('hidden');
-  $('#title').textContent = t.textContent.trim();
-  ({home: loadHome, accounts: loadAccounts, sites: loadSites, settings: loadSettings})[t.dataset.tab]();
-});
+async function api(p, opt) {
+  const r = await fetch(BASE + p, opt);
+  return r.json();
+}
 
-/* ---------- 首页 ---------- */
-async function loadHome() {
-  const [sites, accs] = await Promise.all([api('/api/sites'), api('/api/accounts')]);
-  const siteList = sites.sites || [], accList = accs.tokens || [];
-  $('#sumSite').textContent = siteList.length;
-  $('#sumAcc').textContent = accList.length;
-  $('#accBadge').textContent = `账号: ${accList.length}`;
-  const rows = [];
-  let total = 0;
-  for (const a of accList) {
-    let quota = '-', stateChip = `<span class="chip d">${a.token ? '已授权' : '待授权'}</span>`;
-    if (a.token || a.siteCookie) {
-      const st = await api('/api/status/' + a.key);
-      if (st.availableUSD != null) { total += st.availableUSD; quota = '$' + st.availableUSD; }
-      if (st.detail) quota = `<span class="muted">${esc(st.detail).slice(0,40)}</span>`;
-    }
-    rows.push(`<div class="row">
-      <span style="min-width:110px">${esc(a.siteName)}</span>
-      <span style="min-width:90px">${esc(a.alias || a.key)}</span>
-      <span style="min-width:70px">${quota}</span>
-      ${stateChip}
-      <span class="muted">${esc(a.checkinType || '')}</span>
-      <span style="flex:1"></span>
-      <button class="btn sm" onclick="doCheckin('${a.key}')">签到</button>
-    </div>`);
+async function refresh() {
+  CFG = await api('/config');
+  TKS = (await api('/accounts')).tokens || [];
+  const cfg = CFG.cfg;
+  $('#proxyBadge').textContent = '代理: ' + (cfg.proxy.enabled ? `${cfg.proxy.type}://${cfg.proxy.host}:${cfg.proxy.port}` : '关');
+  $('#schBadge').textContent = '调度: ' + (cfg.schedule.enabled ? '每天 ' + (cfg.schedule.time || '?') : '关');
+  $('#sumAc').textContent = TKS.length;
+  $('#sumSite').textContent = cfg.sites.length;
+  $('#sumLogin').textContent = TKS.filter(t => t.token || t.siteCookie).length;
+
+  // 站点下拉
+  $('#aSite').innerHTML = cfg.sites.map(s => `<option value="${s.key}">${s.name} (${s.checkinType})</option>`).join('');
+  $('#logAc').innerHTML = '<option value="">— 选择账号 —</option>' + TKS.map(t => `<option value="${t.key}">${t.alias || t.key} @ ${t.siteName} (${t.githubAccount || '-'})</option>`).join('');
+  // 站点卡片(原版结构)
+  $('#siteGrid').innerHTML = cfg.sites.map(s => {
+    const mode = s.checkinType === 'login' ? '登录即发额度·每日重登领取' : '需单独签到·全自动';
+    return `<div class="card"><div class="lbl">${s.name}</div><div class="val" style="font-size:15px">${mode}</div><div class="lbl">${s.baseUrl}</div></div>`;
+  }).join('');
+  // 矩阵 + 额度(原版结构)
+  const rows = []; const quota = [];
+  for (const t of TKS) {
+    const site = cfg.sites.find(s => s.key === t.siteKey);
+    const login = !!(t.token || t.siteCookie);
+    const name = t.alias || t.key;
+    rows.push(`<div class="row"><span>${name}</span><span class="lbl" style="flex:1">${site?.name||t.siteKey} · ${t.githubAccount||'-'}</span>
+      <span class="chip ${login?'a':'c'}">${login?'已登录':'未授权'}</span>
+      <span class="chip ${t.encCredential?'a':'b'}">${t.encCredential?'凭据库✓全自动':'手动模式'}</span>
+      <button class="btn sm" data-a="${t.key}">查看额度</button>
+      <button class="btn sm" data-f="${t.key}">刷新余额</button>
+      <button class="btn sm" data-c="${t.key}">签到</button>
+      <button class="btn sm" data-l="${t.key}">查看日志</button>
+      <button class="btn sm danger" data-d="${t.key}">删除</button></div>`);
+    quota.push(`<div class="card" data-a="${t.key}"><div class="lbl">${name} · ${site?.name||''}</div><div class="lbl">可用额度</div><div class="val" id="q_${t.key}_rem">-</div><div class="lbl">已用额度</div><div class="val warn" id="q_${t.key}_used">-</div><div class="lbl">今日消耗</div><div class="val ok" id="q_${t.key}_bonus">-</div></div>`);
   }
-  $('#sumQuota').textContent = '$' + total.toFixed(2);
-  $('#matrix').innerHTML = rows.join('') || '<div class="muted">暂无账号 — 到「账号」页添加</div>';
+  $('#matrix').innerHTML = rows.join('') || '<div class="row">还没有账号</div>';
+  $('#matrix2').innerHTML = rows.join('') || '<div class="row">还没有账号</div>';
+  $('#quotaGrid').innerHTML = quota.join('');
+  // 事件
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => fetchStatus(b.dataset.a));
+  document.querySelectorAll('[data-l]').forEach(b => b.onclick = () => showLogs(b.dataset.l, '系统'));
+  document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { toast('刷新中…'); fetchStatus(b.dataset.f, true); });
+  document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => doCheckin(b.dataset.c));
+  document.querySelectorAll('[data-d]').forEach(b => b.onclick = () => delAccount(b.dataset.d));
+  // 设置表单(原版字段)
+  $('#sHost').value = cfg.proxy.host; $('#sPort').value = cfg.proxy.port;
+  $('#sCron').value = cfg.schedule.time || '09:05';
+  $('#sSchOn').checked = !!cfg.schedule.enabled;
+}
+
+async function fetchStatus(key, force) {
+  const r = await api('/status/' + key + (force ? '?force=1' : ''));
+  if (!r.ok) { toast('接口失败: ' + (r.detail || r.error || '')); return; }
+  const el1 = $('#q_' + key + '_rem'), el2 = $('#q_' + key + '_used'), el3 = $('#q_' + key + '_bonus');
+  if (!r.authorized) {
+    if (el1) el1.textContent = '未授权';
+    if (el2) el2.textContent = '-';
+    if (el3) el3.textContent = '-';
+    return;
+  }
+  if (el1) el1.textContent = '$' + r.availableUSD;
+  if (el2) el2.textContent = '$' + r.usedUSD;
+  if (el3) el3.textContent = r.todayUsed != null ? '今日 $' + r.todayUsed : '-';
+  toast('✔ ' + key + (r.user ? ' @ ' + r.user : '') + '：可用 $' + r.availableUSD + ' / 已用 $' + r.usedUSD);
 }
 
 async function doCheckin(key) {
-  if (!confirm('立即签到该账号?')) return;
-  const r = await post('/api/checkin/' + key);
-  alert(r.message || JSON.stringify(r));
-  loadHome();
+  toast('签到已触发(两级人机验证全自动,失败即报错)…');
+  const r = await api('/checkin/' + key, { method:'POST' });
+  toast(r.message || JSON.stringify(r));
+  fetchStatus(key); refresh();
 }
 
-/* ---------- 账号页 ---------- */
-async function loadAccounts() {
-  const sites = await api('/api/sites');
-  $('#accSite').innerHTML = (sites.sites || []).map(s => `<option value="${s.key}">${esc(s.name)} (${s.checkinType})</option>`).join('');
-  const accs = await api('/api/accounts');
-  const rows = (accs.tokens || []).map(a => `
-    <div class="row">
-      <span style="min-width:110px">${esc(a.siteName)}</span>
-      <span style="min-width:80px">${esc(a.alias || a.key)}</span>
-      <span class="chip ${a.token || a.siteCookie ? 'a' : 'b'}">${a.token || a.siteCookie ? '凭据✓' : '待授权'}</span>
-      <span class="chip ${a.encCredential ? 'a' : 'b'}">${a.encCredential ? '凭据库✓(全自动)' : '无凭据(手动模式)'}</span>
-      <span style="flex:1"></span>
-      <button class="btn sm" onclick="openAuth('${a.key}',1)">全自动授权</button>
-      <button class="btn sm warn" onclick="openAuth('${a.key}',0)">手动登录授权</button>
-      <button class="btn sm" onclick="delAcc('${a.key}')">删除</button>
-    </div>
-    <div id="auth-${a.key}" class="authpanel hidden"></div>`).join('');
-  $('#accList').innerHTML = rows || '<div class="muted">暂无账号</div>';
+async function delAccount(key) {
+  if (!confirm('删除账号 ' + key + '?')) return;
+  await api('/accounts/' + key, { method:'DELETE' });
+  toast('已删除'); refresh();
 }
 
-$('#addAccForm').onsubmit = async e => {
-  e.preventDefault();
-  const r = await post('/api/accounts/save', {siteKey: $('#accSite').value, alias: $('#accAlias').value || undefined});
-  if (r.ok) { $('#accAlias').value = ''; loadAccounts(); } else alert(r.detail || r.error);
-};
-
-async function delAcc(key) {
-  if (!confirm('删除该账号?')) return;
-  await api('/api/accounts/' + key, {method: 'DELETE'});
-  loadAccounts();
+async function showLogs(key, cat) {
+  const r = await api('/logs/' + key + '?category=' + cat + '&limit=50');
+  const box = $('#logBox');
+  if (!r.ok) { box.innerHTML = '失败: ' + (r.error || r.detail || ''); return; }
+  const rows = r.rows || [];
+  let html = rows.map(x => `<div><span class="t">[${x.time || ''}]</span> <span class="e">[${x.category}]</span> ${esc(x.text || '')}${x.quota ? ' <b>+$' + (x.quota / 500000).toFixed(4) + '</b>' : ''}</div>`).join('');
+  if (r.lastBonus) html = `<div style="color:#6bdf85">🎁 最近签到奖励：[${r.lastBonus.time}] ${esc(r.lastBonus.text || '')}</div><hr style="border:none;border-top:1px solid #252a45;margin:8px 0">` + html;
+  box.innerHTML = html || '无记录';
 }
 
-/* ---------- 授权面板:mode 1=全自动(headless,需凭据库) 0=手动登录(有头,自输密码) ---------- */
-async function openAuth(key, auto) {
-  const panel = $('#auth-' + key);
-  panel.classList.remove('hidden');
-  if (auto) {
-    panel.innerHTML = `
-      <div class="f"><label>GitHub 账号(可选,防串号)</label><input id="ghu-${key}" placeholder="留空自动"></div>
-      <div class="f"><label>GitHub 密码</label><input id="ghp-${key}" type="password"></div>
-      <div class="f"><label>TOTP 密钥(2FA setup key,没有可留空)</label><input id="ghs-${key}" placeholder="如 JBSWY3DPEHPK3PXP"></div>
-      <button class="btn" onclick="startAuto('${key}')">保存凭据并授权</button>
-      <div class="muted" style="margin-top:6px">凭据 AES-256-GCM 加密存储;之后签到/换凭据全自动。</div>
-      <div class="oauth-status hidden" id="st-${key}"></div>`;
-  } else {
-    panel.innerHTML = `
-      <div class="muted">将弹出浏览器窗口:你自己输入 GitHub 密码/2FA 并点击授权。<b>不保存任何密码</b>,仅登录态存本服务器,之后换凭据全自动。</div>
-      <button class="btn warn" style="margin-top:10px" onclick="startManual('${key}')">弹出浏览器登录</button>
-      <div class="oauth-status hidden" id="st-${key}"></div>`;
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function toast(m){const d=document.createElement('div');d.textContent=m;d.style.cssText='position:fixed;top:18px;right:18px;background:#1f2550;border:1px solid #252a45;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px;z-index:999';document.body.appendChild(d);setTimeout(()=>d.remove(),4000)}
+
+/* ---------- 授权(Python 引擎:任务轮询,替代原版 Android/Electron 桥) ---------- */
+async function startAuth(mode) {
+  const siteKey = $('#aSite').value, gh = $('#aGh').value.trim();
+  let accountKey = $('#aKey').value.trim();
+  // 别名未存过则先创建账号
+  const exists = TKS.find(t => (t.alias || t.key) === accountKey);
+  if (!exists && accountKey) {
+    await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ siteKey, alias: accountKey, githubAccount: gh || undefined }) });
+  } else if (exists) accountKey = exists.key;
+  if (!accountKey) { toast('先填账号别名（如 gh1）'); return; }
+
+  if (gh) await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ key: accountKey, siteKey, githubAccount: gh }) });
+
+  const stat = $('#authStat'); stat.classList.remove('hidden');
+  if (mode === 'auto') {
+    const pw = prompt('GitHub 密码(存入加密凭据库,读不回显):');
+    if (!pw) return;
+    const totp = prompt('TOTP 密钥(2FA setup key,没有点取消):') || '';
+    await api('/credentials/' + accountKey, { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ username: gh || undefined, password: pw, totpSecret: totp || undefined }) });
   }
-}
-
-async function startAuto(key) {
-  const body = {
-    username: $('#ghu-' + key).value.trim() || undefined,
-    password: $('#ghp-' + key).value || undefined,
-    totpSecret: $('#ghs-' + key).value.trim() || undefined,
-  };
-  if (!body.password) return alert('需要密码');
-  await post(`/api/credentials/${key}`, body);
-  if (body.username) await post('/api/accounts/save', {key, githubAccount: body.username});
-  const t = await post('/api/oauth/start', {accountKey: key});
-  pollAuth(key, t.task, $('#st-' + key));
-}
-
-async function startManual(key) {
-  const t = await post('/api/oauth/manual', {accountKey: key});
-  pollAuth(key, t.task, $('#st-' + key));
-}
-
-async function pollAuth(key, task, el) {
-  el.classList.remove('hidden');
+  const ep = mode === 'auto' ? '/oauth/start' : '/oauth/manual';
+  const t = await api(ep, { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ accountKey }) });
+  if (!t.task) { toast('发起失败: ' + (t.detail || '')); return; }
+  toast(mode === 'auto' ? 'headless 全自动授权中…' : '浏览器已弹出,请手动登录(密码不存储)');
   const tick = async () => {
-    const s = await api('/api/oauth/status?task=' + task);
+    const s = await api('/oauth/status?task=' + t.task);
     if (s.state === 'running') {
-      el.innerHTML = `<span class="spin"></span>${esc(s.message || '进行中…')}`;
+      stat.innerHTML = '⏳ ' + esc(s.message || '进行中…');
       setTimeout(tick, 3000);
     } else {
-      el.innerHTML = `<b class="${s.state === 'ok' ? 'ok' : 'err'}">${s.state === 'ok' ? '✓ ' + esc(s.message) : '✗ ' + esc(s.message)}</b>`
-        + (s.login ? ` <span class="muted">@${esc(s.login)}</span>` : '');
-      loadAccounts();
+      stat.innerHTML = (s.state === 'ok' ? '✅ ' : '❌ ') + esc(s.message || s.state) + (s.login ? ' <b>@' + esc(s.login) + '</b>' : '');
+      toast(s.state === 'ok' ? '✅ 授权成功: ' + (s.login || '') : '授权未完成: ' + (s.message || ''));
+      refresh();
     }
   };
   tick();
 }
+$('#btnAuth').onclick = () => startAuth('auto');
+$('#btnAuthManual').onclick = () => startAuth('manual');
 
-/* ---------- 站点页 ---------- */
-async function loadSites() {
-  const s = await api('/api/sites');
-  $('#siteList').innerHTML = (s.sites || []).map(x => `
-    <div class="row">
-      <span style="min-width:130px"><a href="${esc(x.affUrl || x.baseUrl)}" target="_blank" style="color:#8ab4ff;text-decoration:none">${esc(x.name)}</a></span>
-      <span class="muted" style="min-width:190px">${esc(x.baseUrl)}</span>
-      <span class="chip d">${esc(x.checkinType)}</span>
-      <span style="flex:1"></span>
-      <button class="btn sm danger" onclick="delSite('${x.key}')">删除</button>
-    </div>`).join('') || '<div class="muted">暂无站点</div>';
-}
-
-$('#addSiteForm').onsubmit = async e => {
+/* ---------- 表单(原版行为) ---------- */
+$('#addForm').onsubmit = async e => {
   e.preventDefault();
-  const r = await post('/api/sites/save', {
-    name: $('#siteName').value, baseUrl: $('#siteUrl').value, checkinType: $('#siteType').value});
-  if (r.ok) { $('#siteName').value = ''; $('#siteUrl').value = ''; loadSites(); } else alert(r.detail || r.error);
+  const t = { siteKey: $('#aSite').value, alias: $('#aKey').value.trim(), githubAccount: $('#aGh').value.trim() || undefined, token: $('#aToken').value.trim() || undefined };
+  if (!t.alias) { toast('账号别名必填'); return; }
+  await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(t) });
+  toast('已保存'); $('#aToken').value = ''; refresh();
 };
-$('#btnSetup').onclick = async () => { await post('/api/setup'); loadSites(); };
-
-async function delSite(key) {
-  if (!confirm('删除该站点(含其下账号)?')) return;
-  await api('/api/sites/' + key, {method: 'DELETE'});
-  loadSites();
-}
-
-/* ---------- 设置页 ---------- */
-async function loadSettings() {
-  const c = await api('/api/settings');
-  const s = c.schedule || {}, p = c.proxy || {};
-  $('#schOn').checked = !!s.enabled;
-  if (s.time) $('#schTime').value = s.time;
-  $('#pxOn').checked = !!p.enabled;
-  $('#pxHost').value = p.host || '127.0.0.1';
-  $('#pxPort').value = p.port || 10808;
-  $('#schBadge').textContent = `调度: ${s.enabled ? '每天 ' + (s.time || '?') : '关'}`;
-}
-
-$('#schForm').onsubmit = async e => {
+$('#siteForm').onsubmit = async e => {
   e.preventDefault();
-  await post('/api/settings/save', {schedule: {enabled: $('#schOn').checked, time: $('#schTime').value}});
-  loadSettings();
+  const r = await api('/sites/save', { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ name: $('#sName').value, baseUrl: $('#sUrl').value, checkinType: $('#sType').value }) });
+  if (r.ok) { toast('站点已添加'); $('#sName').value = ''; $('#sUrl').value = ''; refresh(); }
+  else toast(r.detail || r.error);
+};
+$('#btnSetup').onclick = async () => { await api('/setup', { method:'POST' }); toast('内置四站已载入'); refresh(); };
+$('#setForm').onsubmit = async e => {
+  e.preventDefault();
+  await api('/settings/save', { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ proxy: { enabled: CFG.cfg.proxy.enabled, host: $('#sHost').value, port: +$('#sPort').value },
+                           schedule: { enabled: $('#sSchOn').checked, time: $('#sCron').value } }) });
+  toast('已保存(即时生效)'); refresh();
 };
 $('#btnRunNow').onclick = async () => {
-  if (!confirm('立即对所有账号跑一轮签到?')) return;
-  const r = await post('/api/run-all');
-  alert(r.message || '已触发');
+  const r = await api('/run-all', { method:'POST' });
+  toast(r.message || '已触发,看运行日志');
 };
-$('#proxyForm').onsubmit = async e => {
-  e.preventDefault();
-  await post('/api/settings/save', {proxy: {enabled: $('#pxOn').checked, host: $('#pxHost').value, port: +$('#pxPort').value, type: 'socks5'}});
-  alert('已保存');
+$('#btnLogs').onclick = () => { const k=$('#logAc').value; if(!k) toast('先选账号'); else showLogs(k, '系统'); };
+$('#btnHist').onclick = async () => { const r=await api('/history'); $('#logBox').innerHTML = (r.data||[]).map(x=>`<div><span class="t">[${x.time}]</span> <span class="e">[${x.site||'-'}]${x.account||''} ${x.event||''}</span> ${(x.detail?JSON.stringify(x.detail):'')}</div>`).join(''); };
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
+  t.classList.add('on');
+  document.querySelectorAll('[id^="tab-"]').forEach(b=>b.classList.add('hidden'));
+  $('#tab-' + t.dataset.tab).classList.remove('hidden');
+  $('#title').textContent = t.textContent.trim();
+});
+
+$('#btnRefreshAll').onclick = async () => {
+  toast('全部余额刷新中(绕过缓存)…');
+  for (const t of TKS) if (t.token || t.siteCookie) await fetchStatus(t.key, true);
+  toast('✅ 刷新完成');
 };
 
-/* ---------- SSE 实时日志 ---------- */
-function initSSE() {
-  try {
-    const es = new EventSource('/api/events');
-    es.onmessage = ev => {
-      try {
-        const l = JSON.parse(ev.data);
-        const line = document.createElement('div');
-        line.innerHTML = `<span class="t">${(l.time||'').slice(11,19)}</span> <span class="e">[${esc(l.event)}]</span> ${esc(l.site)}/${esc(l.account)} <span class="${l.level === 'err' ? 'err' : ''}">${esc(typeof l.detail === 'object' ? JSON.stringify(l.detail) : (l.detail || ''))}</span>`;
-        const box = $('#liveLog');
-        box.prepend(line);
-        while (box.children.length > 200) box.lastChild.remove();
-      } catch (_) {}
-    };
-  } catch (_) {}
-}
-
-initSSE();
-loadHome();
+refresh();
 </script>
 </body>
 </html>

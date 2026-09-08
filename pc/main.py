@@ -79,15 +79,28 @@ def list_accounts():
     return {"ok": True, "tokens": flat}
 
 
+_status_cache: dict[str, tuple[float, dict]] = {}   # account_key → (ts, result)
+_STATUS_CACHE_TTL = 600                              # 10 分钟:余额按需获取,不轮询站点
+
+
 @app.get("/api/status/{account_key}")
-def account_status(account_key: str):
+def account_status(account_key: str, force: int = 0):
+    """账号额度(按需获取:页面加载/手动刷新才调;10 分钟缓存防多端重复打站点,
+    force=1 绕过缓存)。"""
+    import time as _time
+    cached = _status_cache.get(account_key)
+    now = _time.time()
+    if cached and not force and now - cached[0] < _STATUS_CACHE_TTL:
+        return cached[1]
+
     cfg = config.load()
     found = config.find_account(cfg, account_key)
     if not found:
         raise HTTPException(404, "账号不存在")
     site, acc = found
+    from .engine.silent_auth import call_with_auto_reauth
+    self_r = call_with_auto_reauth(site, acc, cfg, "get", "/api/user/self")
     cl = SiteClient(site, acc, cfg)
-    self_r = cl.self_info()
     st_r = cl.status()
     if self_r.status != 200 or self_r.blocked_by_waf:
         db.append_log(site["key"], account_key, "status",
@@ -104,7 +117,9 @@ def account_status(account_key: str):
         "usedUSD": round(used / unit, 2),
         "user": d.get("display_name") or d.get("username") or d.get("github_id"),
         "todayUsed": round(float(d.get("today_used_quota") or 0) / unit, 4) or None,
+        "cachedAt": int(now),
     }
+    _status_cache[account_key] = (now, result)
     db.append_log(site["key"], account_key, "status", {"availableUSD": result["availableUSD"]})
     return result
 
@@ -200,6 +215,38 @@ async def events():
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/config")
+def get_config():
+    """原版 WebUI 兼容:返回带 cfg 包装的配置(token 打码)。"""
+    cfg = config.load()
+    return {"ok": True, "cfg": {**cfg, "sites": [_mask_site(s) for s in cfg.get("sites", [])]}}
+
+
+@app.get("/api/logs/{account_key}")
+def account_logs(account_key: str, category: str = "系统", limit: int = 50, page: int = 1):
+    """原版 WebUI 兼容:站点使用日志 + lastBonus(找「签到」记录)。"""
+    cfg = config.load()
+    found = config.find_account(cfg, account_key)
+    if not found:
+        raise HTTPException(404, "账号不存在")
+    site, acc = found
+    from .engine.silent_auth import call_with_auto_reauth
+    r = call_with_auto_reauth(site, acc, cfg, "get",
+                              f"/api/log/self?category={category}&page={page}&limit={limit}")
+    data = (r.data or {}).get("data") or {}
+    items = data.get("list") or data.get("items") or (data if isinstance(data, list) else [])
+    rows = [{
+        "time": str(x.get("created_at") or x.get("time") or "")[:19],
+        "category": x.get("category") or category,
+        "text": (x.get("description") or x.get("content") or x.get("remark")
+                 if isinstance(x, dict) else str(x)),
+        "quota": x.get("quota") if isinstance(x, dict) else None,
+    } for x in (items or [])]
+    last_bonus = next((row for row in rows if "签到" in str(row["text"])), None)
+    db.append_log(site["key"], account_key, "logs", {"http": r.status, "rows": len(rows)})
+    return {"ok": r.status == 200, "http": r.status, "rows": rows, "lastBonus": last_bonus}
 
 
 @app.get("/api/history")

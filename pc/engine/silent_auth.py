@@ -132,11 +132,17 @@ def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = Non
 
 def ensure_token(site: dict, account: dict, cfg: dict,
                  credential: dict | None = None) -> str:
-    """token 即将过期(JWT exp<60s)⇒ 预判换新;返回可用 token(可空)。"""
-    token = (account.get("token") or "").strip()
+    """token 即将过期(JWT exp<60s)⇒ 预判换新;返回可用 token(可空)。
+
+    config.json 里 token/siteCookie 是 enc: 密文,判定前先透明解密。
+    """
+    from ..service.secret_store import open_ as _open
+    token = _open(account.get("token"))
     if not token_expiring(token):
+        account["token"] = token            # 就地换成明文,调用方直接可用
+        account["siteCookie"] = _open(account.get("siteCookie"))
         return token
-    cookie = (account.get("siteCookie") or "").strip()
+    cookie = _open(account.get("siteCookie"))
     if token or cookie:                       # 有任一凭据才尝试静默换新
         r = exchange(site, account, cfg, credential)
         if r.state == "ok" and r.token:
@@ -152,8 +158,8 @@ def call_with_auto_reauth(site: dict, account: dict, cfg: dict, method: str, pat
 
     返回 CallResult;换新成功(token 或 cookie 任一变化)自动重试一次并标记 reauthed。
     """
+    ensure_token(site, account, cfg, credential)   # 先确保凭据新鲜(就地解密/换新)
     client = SiteClient(site, account, cfg)
-    ensure_token(site, account, cfg, credential)
     r = client.call(method, path)
     if r.status != 401:
         return r
@@ -161,8 +167,11 @@ def call_with_auto_reauth(site: dict, account: dict, cfg: dict, method: str, pat
     old_token = (account.get("token") or "").strip()
     old_cookie = (account.get("siteCookie") or "").strip()
     fresh = exchange(site, account, cfg, credential)
-    token_changed = bool(fresh.token) and fresh.token != old_token
-    cookie_changed = bool(fresh.site_cookie) and fresh.site_cookie != old_cookie
+    # exchange 已把新凭据(加密)落盘;比较时对齐同一形态(旧值可能是密文)
+    def _same(a: str, b: str) -> bool:
+        return bool(a) and a == b
+    token_changed = bool(fresh.token) and not _same(fresh.token, old_token)
+    cookie_changed = bool(fresh.site_cookie) and not _same(fresh.site_cookie, old_cookie)
     if not (token_changed or cookie_changed):
         return r
 
@@ -170,6 +179,9 @@ def call_with_auto_reauth(site: dict, account: dict, cfg: dict, method: str, pat
         "token": fresh.token, "siteCookie": fresh.site_cookie,
         "siteUserId": fresh.site_user_id,
     }.items() if v})
+    # 重新构造 client:SiteClient.__init__ 会按新凭据组头
+    # (旧 client.account 是解密时的副本,不随 account 更新——实测 401 复现根因)
+    client = SiteClient(site, account, cfg)
     r2 = client.call(method, path)
     r2.reauthed = True
     return r2
