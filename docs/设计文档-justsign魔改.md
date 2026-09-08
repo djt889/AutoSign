@@ -8,6 +8,7 @@
 **v1.1 修订**:明确「接口复用 vs Scrapling 抓取」分工;澄清自动限速(AutoThrottle)仅属 Spider 框架、普通 fetch 不自动限速;授权流程改为「纯后台 headless 为主,弹出浏览器仅兜底」;新增 `capture_xhr` 背景接口监听辅助手段。
 **v1.2 修订**:3.0 契约清单补全 OAuth 交换凭据通用规则(Set-Cookie 抓取、token/cookie 任一变化即成功、`login=` 防串号、GitHub 过期 URL 转人工清单、「免退出重登」=静默重放 OAuth,全站通用不按站点特判);3.2 功能选型表全面扩充(标签页池/wait_selector/page_setup/init_script/多指纹轮换/locale+timezone 一致性等);0.1.1 `capture_xhr` 升级为授权交换首选手段。
 **v1.3 修订(P2 实战定案,真实账号端到端验证)**:签到 Turnstile 两级全自动失败即报错、无人工签到兜底(§7);OAuth 实现层四个关键定案——登录墙**循环内即时填充**(非等到回调)、**2FA 判定必须先于 `/session` 匹配**(`/sessions/two-factor` 含 `/session` 会被登录分支吞掉)、**framenavigated 导航链**抓 OAuth 中间跳转(SPA 前端消费 code 后跳 dashboard,终态轮询必漏;等价原版 onPageStarted)、**capture_xhr 保险路径**实战立功(捕获前端自发交换请求的响应直接拿凭据);TOTP 走「reconfigure 必须走完才生效」的流程坑记录;`user_data_dir` 单实例约束(残留 Chrome 进程占用会导致 launch_persistent_context 失败,发起前须清理)。
+**v1.4 修订(P3/P4 实战定案)**:落库主路径改为「回调落站点域 + 浏览器有 session cookie ⇒ cookie 即生效凭据,直接落库」(前端消费 code 后服务端再交换必失败,实测 AgentRouter);授权确认页(带 `login=` 参数时出现)自动点 Authorize,选择器锁定 `#oauth-authorize-authorization-code`(防误点 Cancel 被 GitHub 记忆 deny,处置指引见 §7.2);`network_idle` 移除(持续轮询页面永不满足,page_action 卡到超时);state/client_id/交换一律匿名请求(带失效 Bearer 头被回 401,实测 JustDoWork);凭据保存机制完整落地(§7.1:token/cookie 透明加密 + 迁移端点);WebUI + APScheduler 每日调度 + 双授权模式(全自动/手动登录不存密码);login 型每日重登领取实测定案(§3.0)。
 
 ---
 
@@ -577,6 +578,33 @@ android/ (改造后)
 | 前端 UI 文案 | 任何「不绕过人机验证」字样 | 删除 |
 
 同时,**行为层放开**:将 Turnstile 处理从「仅 interaction-only 静默」升级为两级全自动:POST 被拦时先挂官方挂件(interaction-only,无需交互静默过);仍过不去则用 StealthyFetcher 的 Cloudflare 求解能力(`solve_cloudflare=True`)自动过。**两级都失败 ⇒ 明确报错记日志,不提供任何人工签到兜底**——本版定位是全自动化,签到不允许"转人工"路径;授权流程(§5)不受此限,其 B/C 人工兜底保留。
+
+### 7.1 凭据保存机制(实测落地)
+
+**三类凭据,三层保护,全部本地:**
+
+| 凭据 | 存储位置 | 加密 | 说明 |
+|---|---|---|---|
+| GitHub 账号/密码/TOTP 密钥 | `config.json` 账号条目 `encCredential` 字段 | AES-256-GCM(`enc:` 前缀) | 授权自动填充用;**读不回显**(API 只写不读明文);手动登录模式(不存密码)下整字段为空 |
+| 站点 token / session cookie | `config.json` 账号条目 `token` / `siteCookie` 字段 | AES-256-GCM(`enc:` 前缀,透明加解密) | 签到/额度调用用;SiteClient 构造时自动解密,落库(`_persist`/`accounts/save`)时自动加密,调用方无感知 |
+| 浏览器 GitHub 会话 | `data/profiles/<site>/<account>/`(user_data_dir) | Chromium 自管 | 静默换凭据靠它(已登录直接 302);不存密码也能长期全自动 |
+
+**主密钥**:`data/secret.key`(32 字节随机,首启生成,权限 0600)。GitHub 凭据库与 token/cookie 加密共用此钥。可用环境变量 `JUSTSIGN_SECRET` 改路径。
+
+**泄露面分析**:
+
+- `config.json` 与 `data/` 均在 `.gitignore`(凭据永不进仓库)
+- 拿到 `config.json` 但没有 `secret.key` ⇒ 密文不可解(解密失败视为无凭据,触发重新授权,不会静默降级明文)
+- `secret.key` 单独泄露 ⇒ 无 `config.json` 也无用;两者都在 ⇒ 凭据全暴露——**这就是服务只绑内网的原因**(公网部署必须加令牌鉴权 + 文件权限收紧)
+- 浏览器 profile 目录被拷走 ⇒ 等于盗走一次 GitHub 登录态(但无账密/2FA,改密可踢)
+
+**密钥丢失的后果**:`secret.key` 删除/更换后所有 `enc:` 字段解密失败 ⇒ 账号被视为"未授权" ⇒ 重新走一次授权即可恢复(全自动模式凭据库也在密文里,需要重存一次账密)。**务必备份 `secret.key`**(和 config.json 一起备份,单独备份无效)。
+
+**迁移**:`POST /api/seal-existing` 把存量明文 token/cookie 一次性加密(幂等);旧明文格式读取时平滑兼容(读到无 `enc:` 前缀按明文处理,下次落库自动变密文)。
+
+### 7.2 授权安全(access_denied 处置指引)
+
+GitHub 会把"拒绝授权"选择记忆在该 OAuth App 上,之后所有 authorize 直接 302 `error=access_denied`(不再显示确认页)。触发场景:有头窗口/自动点击误点过 Cancel。处置:GitHub → Settings → Applications → Authorized OAuth Apps → 撤销该应用 → 重新授权(确认页重现,自动点击正确按钮)。引擎侧已识别该错误并给出指引,不再盲目重试。
 
 ---
 

@@ -56,7 +56,10 @@ class SiteClient:
 
     def __init__(self, site: dict, account: dict, cfg: dict):
         self.site = site
-        self.account = account or {}
+        # token/siteCookie 在 config.json 里是 enc: 密文(§7 凭据安全),
+        # 使用前透明解密;旧明文格式平滑兼容
+        from ..service.secret_store import unseal_account
+        self.account = unseal_account(account or {})
         self.cfg = cfg
         self.base_url = str(site.get("baseUrl", "")).rstrip("/")
 

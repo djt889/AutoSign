@@ -70,16 +70,20 @@ def token_expiring(token: str) -> bool:
 
 
 def _persist(site: dict, account: dict, r: AuthResult) -> None:
-    """落盘:token/siteCookie/siteUserId/github 锚点;任一变化即算成功。"""
+    """落盘:token/siteCookie/siteUserId/github 锚点;任一变化即算成功。
+
+    token/siteCookie 落盘前加密(AES-256-GCM,§7 凭据安全)。
+    """
+    from ..service.secret_store import seal
     cfg = config_svc.load()
     found = config_svc.find_account(cfg, account["key"])
     if not found:
         return
     s, a = found
     if r.token:
-        a["token"] = r.token
+        a["token"] = seal(r.token)
     if r.site_cookie:
-        a["siteCookie"] = r.site_cookie
+        a["siteCookie"] = seal(r.site_cookie)
     if r.site_user_id:
         a["siteUserId"] = r.site_user_id
     if r.github_login:

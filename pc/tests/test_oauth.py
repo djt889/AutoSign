@@ -139,8 +139,12 @@ def test_persist_token_and_cookie(monkeypatch, tmp_path):
     sa.exchange(site, acc, cfg)
     cfg2 = config.load()
     a2 = cfg2["sites"][0]["accounts"][0]
-    assert a2["token"] == "tok1"
-    assert a2["siteCookie"] == "session=zzz"
+    # 落库是密文(§7 凭据安全),读回可解密
+    from pc.service.secret_store import open_
+    assert a2["token"].startswith("enc:")
+    assert a2["siteCookie"].startswith("enc:")
+    assert open_(a2["token"]) == "tok1"
+    assert open_(a2["siteCookie"]) == "session=zzz"
     assert a2["siteUserId"] == "42"
 
 

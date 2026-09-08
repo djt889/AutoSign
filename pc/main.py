@@ -163,6 +163,23 @@ def run_all():
     return {"ok": True, "message": "已触发(后台串行执行,看实时日志)"}
 
 
+@app.post("/api/seal-existing")
+def seal_existing():
+    """迁移:把存量明文 token/siteCookie 一次性加密(幂等)。"""
+    from .service.secret_store import seal_account
+    cfg = config.load()
+    n = 0
+    for s in cfg.get("sites", []):
+        for a in s.get("accounts") or []:
+            before_token, before_ck = a.get("token"), a.get("siteCookie")
+            seal_account(a)
+            if (before_token and str(before_token) != a.get("token")) or                (before_ck and str(before_ck) != a.get("siteCookie")):
+                n += 1
+    config.save(cfg)
+    db.append_log("*", "*", "seal-existing", {"sealed_accounts": n})
+    return {"ok": True, "sealed_accounts": n}
+
+
 @app.get("/api/events")
 async def events():
     """SSE 实时日志流:订阅 db 追加,断线由前端 EventSource 自动重连。"""
@@ -249,9 +266,13 @@ def accounts_save(body: dict):
         site["accounts"].append(acc)
     if body.get("alias"):
         acc["alias"] = str(body["alias"]).strip()
-    for f in ("githubAccount", "token", "siteCookie", "siteUserId"):
+    from .service.secret_store import seal
+    for f in ("githubAccount", "siteUserId"):
         if body.get(f) is not None:
             acc[f] = body[f]
+    for f in ("token", "siteCookie"):
+        if body.get(f) is not None:
+            acc[f] = seal(body[f])
     acc["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     config.save(cfg)
     db.append_log(site["key"], key, "account-save", {"hasToken": bool(acc.get("token"))})
