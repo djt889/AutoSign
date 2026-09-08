@@ -1,0 +1,6 @@
+scrapling[fetchers]>=0.4.11
+fastapi>=0.115
+uvicorn>=0.30
+cryptography>=42.0
+pyotp>=2.9
+pytest>=8.0
