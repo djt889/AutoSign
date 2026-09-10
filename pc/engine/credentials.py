@@ -26,7 +26,15 @@ def _find(cfg: dict, cid: str) -> dict | None:
 
 
 def list_credentials(secrets: bool = False) -> list[dict]:
-    """凭据列表(默认隐藏 password/twofa 密文细节,仅返回是否配置)。"""
+    """凭据列表(默认隐藏 password/twofa 密文细节,仅返回是否配置)。
+
+    附带 verified 状态(见 verify 流程):
+    - unverified: 从未验证过
+    - ok: 上次验证通过(含验证时间 verified_at)
+    - stale: 7 天前的验证已过期,建议重验
+    - failed: 上次验证失败(含失败原因 verify_error)
+    """
+    import time as _time
     cfg = config_svc.load()
     out = []
     for c in _load_creds(cfg):
@@ -36,9 +44,37 @@ def list_credentials(secrets: bool = False) -> list[dict]:
             "note": c.get("note") or "",
             "hasPassword": bool(c.get("password")),
             "hasTwofa": bool(c.get("twofa")),
+            "verified": c.get("verified") or "unverified",
+            "verifiedAt": c.get("verifiedAt") or "",
+            "verifyError": c.get("verifyError") or "",
         }
+        if item["verified"] == "ok" and item["verifiedAt"]:
+            try:
+                age_days = (_time.time() - float(item["verifiedAt"])) / 86400
+                if age_days > 7:
+                    item["verified"] = "stale"
+            except (TypeError, ValueError):
+                pass
         out.append(item)
     return out
+
+
+def mark_verified(credential_id: str, ok: bool, error: str = "") -> bool:
+    """写验证结果:ok ⇒ verified=ok + verifiedAt=now;失败 ⇒ verified=failed + 原因。"""
+    import time as _time
+    cfg = config_svc.load()
+    c = _find(cfg, credential_id)
+    if not c:
+        return False
+    if ok:
+        c["verified"] = "ok"
+        c["verifiedAt"] = str(_time.time())
+        c.pop("verifyError", None)
+    else:
+        c["verified"] = "failed"
+        c["verifyError"] = error[:200]
+    config_svc.save(cfg)
+    return True
 
 
 def upsert_credential(alias: str = "", github_user: str = "", site_account: str = "",

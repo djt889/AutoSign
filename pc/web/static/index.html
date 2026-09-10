@@ -464,7 +464,9 @@ async function addAccWithCred(siteKey,credId,alias,gh){
  * 旁边附"清除密码"/"清除 2FA"明示按钮,防误点。 */
 function credFormSheet(cid){
   const c=(cid?(window.__creds||[]).find(x=>x.id===cid):null)||{};
+  const vtxt={ok:'✅ 已验证',stale:'⚠️ 验证已过期(>7天)',failed:'❌ 验证失败',unverified:'○ 未验证'}[c.verified||'unverified'];
   openSheet(cid?'编辑凭据':'录入新账号凭据',`<div class="hint" style="margin-bottom:8px">同一 GitHub 账号只需录入一次(密码/2FA AES-256-GCM 加密),可绑定到任意多个站点。</div>
+  ${cid?`<div class="hint" style="margin-bottom:8px">验证状态: <b>${vtxt}</b>${c.verified==='failed'&&c.verifyError?` — ${esc(c.verifyError)}`:''}${c.verifiedAt?`（${new Date(c.verifiedAt*1000).toLocaleString()}）`:''}</div>`:''}
   <div class="fld"><label>备注名(可留空用 GitHub 名)</label><input id="cf_alias" value="${esc(c.alias||'')}" placeholder="如 主号"></div>
   <div class="fld"><label>GitHub 用户名</label><input id="cf_gh" value="${esc(c.githubUser||'')}"></div>
   <div class="fld"><label>GitHub 密码${cid?`（${c.hasPassword?'当前: 已配置(●●●●)':'未配置'}，留空=保留）`:''}</label>
@@ -472,7 +474,54 @@ function credFormSheet(cid){
   <div class="fld"><label>TOTP 密钥(2FA setup key)${cid?`（${c.hasTwofa?'当前: 已配置':'未配置'}，留空=保留）`:''}</label>
     <input id="cf_tp" placeholder="GitHub给的16位密钥，留空保留/不配"></div>
   <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>
+  ${cid?`<button class="btn lb w100" onclick="verifyCred('${cid}')">✓ 验证此凭据(弹浏览器登录一次)</button>`:''}
+  <button class="btn lb w100" onclick="verifyUnsaved()">✓ 直接验证账密(不保存,只验一次)</button>
   ${cid?`<button class="btn r w100" onclick="clearCredPw('${cid}')">清除密码(切为手动授权模式)</button>`:''}`);
+}
+/* 验证凭据:保存后(如有输入) → 起 headful CDP 真窗口验证任务 → 轮询进度 */
+async function verifyCred(cid){
+  // 先保存表单里的修改(有输入才覆盖,留空保留——saveCredForm 同逻辑)
+  const al=$('#cf_alias').value.trim(),gh=$('#cf_gh').value.trim();
+  const pw=$('#cf_pw').value,tp=$('#cf_tp').value.trim();
+  const body={id:cid};
+  if(al)body.alias=al; if(gh)body.githubUser=gh;
+  if(pw)body.password=pw; if(tp)body.twofa=tp;
+  const sv=await post('/credentials',body);
+  if(!sv.ok){toast(sv.detail||'保存失败');return;}
+  const t=await post('/credentials/verify',{id:cid});
+  if(!t.task){toast(t.detail||'发起失败');return;}
+  pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
+}
+/* 未保存模式:表单里的账密直接验一次,不落盘 */
+async function verifyUnsaved(){
+  const gh=$('#cf_gh').value.trim(),pw=$('#cf_pw').value,tp=$('#cf_tp').value.trim();
+  if(!gh||!pw){toast('需要 GitHub 用户名 + 密码(只验一次,不保存)');return;}
+  const t=await post('/credentials/verify',{username:gh,password:pw,twofa:tp||undefined});
+  if(!t.task){toast(t.detail||'发起失败');return;}
+  pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
+}
+function pollVerify(task,msg){
+  openSheet('验证凭据',`<div class="hint" id="vfMsg">${esc(msg)}</div>
+  <div class="fld" style="margin-top:8px"><label>6 位验证码(手机 2FA App 或 GitHub 发到登录邮箱的设备验证码)</label>
+    <input id="vf_totp" inputmode="numeric" maxlength="6" placeholder="收到就填,30秒内有效"></div>
+  <button class="btn lb w100" onclick="sendVerifyTotp()">注入验证码</button>`);
+  const tick=async()=>{
+    const s=await api('/oauth/status?task='+task);
+    const m=$('#vfMsg');
+    if(s.state==='running'){if(m)m.textContent=s.message||'验证中…';setTimeout(tick,3000);}
+    else{
+      const ok=s.state==='ok';
+      if(m)m.innerHTML=(ok?'✅ ':'❌ ')+esc(s.message||s.state);
+      toast((ok?'✅ 验证通过,以后绑定站点直接复用':'❌ 验证失败: '+(s.message||'')));
+      if(ok)setTimeout(()=>{closeSheet();refresh();},1500);
+    }};
+  tick();
+}
+async function sendVerifyTotp(){
+  const code=($('#vf_totp')||{}).value?.trim();
+  if(!/^\d{6}$/.test(code)){toast('请输入 6 位数字码');return;}
+  const r=await post('/oauth/totp',{code});
+  toast(r.ok?'已注入,请等窗口自动继续':'注入失败');
 }
 async function saveCredForm(cid){
   const body={};
@@ -500,15 +549,25 @@ function credListSheet(){
   <button class="btn b w100" onclick="credFormSheet()">＋ 录入新账号凭据</button>`);
   api('/credentials').then(c=>{
     window.__creds=c.credentials||[];
-    $('#credListBody').innerHTML=(c.credentials||[]).map(x=>`<div class="menu-item">
+    $('#credListBody').innerHTML=(c.credentials||[]).map(x=>{
+      const vt={ok:'<span class="pill g">✅ 已验证</span>',stale:'<span class="pill o">验证过期</span>',
+                failed:'<span class="pill r">验证失败</span>',unverified:'<span class="pill s">未验证</span>'}[x.verified||'unverified'];
+      return `<div class="menu-item">
       <span style="font-weight:700;color:var(--blue)">${esc(x.alias||x.githubUser||x.id)}</span>
       ${x.githubUser?`<span class="hint">${esc(x.githubUser)}</span>`:''}
       ${x.hasPassword&&x.hasTwofa?'<span class="pill b">全自动</span>':(x.hasPassword?'<span class="pill b">有密码</span>':'')}
       ${x.hasTwofa?'<span class="pill o">2FA</span>':''}
+      ${vt}
       <span style="flex:1"></span>
-      <span style="color:var(--blue);font-size:12px;cursor:pointer" onclick="credFormSheet('${x.id}')">编辑</span>
-      <span style="color:var(--red);font-size:12px;cursor:pointer;margin-left:10px" onclick="delCred('${x.id}')">删除</span></div>`).join('')||'<div class="hint">暂无凭据</div>';
+      <span style="color:var(--green);font-size:12px;cursor:pointer" onclick="verifyCredById('${x.id}')">验证</span>
+      <span style="color:var(--blue);font-size:12px;cursor:pointer;margin-left:10px" onclick="credFormSheet('${x.id}')">编辑</span>
+      <span style="color:var(--red);font-size:12px;cursor:pointer;margin-left:10px" onclick="delCred('${x.id}')">删除</span></div>`}).join('')||'<div class="hint">暂无凭据</div>';
   });
+}
+async function verifyCredById(cid){
+  const t=await post('/credentials/verify',{id:cid});
+  if(!t.task){toast(t.detail||'发起失败');return;}
+  pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
 }
 async function delCred(id){confirmDlg('删除凭据','确认删除该凭据?已绑定它的站点账号将失去自动填充,但登录态仍在。',async()=>{await api('/credentials/'+id,{method:'DELETE'});toast('已删除');credListSheet();});}
 /* 兼容旧:直接输 GitHub 名建账号(无凭据时兜底) */

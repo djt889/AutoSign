@@ -508,8 +508,79 @@ def oauth_status(task: str):
     with _task_lock:
         t = _oauth_tasks.get(task)
     if not t:
+        t = _verify_tasks.get(task)
+    if not t:
         raise HTTPException(404, "任务不存在")
     return {"ok": True, **t}
+
+
+_verify_tasks: dict[str, dict] = {}
+
+
+@app.post("/api/credentials/verify")
+def credentials_verify(body: dict):
+    """验证凭据:用「验证专用站点+账号」(profile 隔离,不污染真实账号)跑一次
+    headful CDP 真窗口 GitHub 登录,账密自动填充,2FA/邮箱码走授权弹层注入。
+    通过 ⇒ verified=ok(以后复用);失败 ⇒ verified=failed + 原因。
+    凭据未保存也可验证:传 username/password/twofa 明文(不落盘,只验一次)。
+    body: {id?|username?,password?,twofa?}"""
+    from .engine.credentials import mark_verified
+    cfg = config.load()
+    cid = str(body.get("id", "") or "")
+    if cid:
+        found_c = next((c for c in (cfg.get("credentials") or [])
+                        if c.get("id") == cid), None)
+        if not found_c:
+            raise HTTPException(404, "凭据不存在")
+        try:
+            from .engine import credentials as cred_mod
+            from .service import crypto
+            gh = found_c.get("githubUser") or ""
+            pw = crypto.decrypt(found_c["password"]) if found_c.get("password") else ""
+            tp = crypto.decrypt(found_c["twofa"]) if found_c.get("twofa") else ""
+        except Exception:
+            raise HTTPException(500, "凭据解密失败")
+        label = found_c.get("alias") or gh or cid
+    else:
+        gh = str(body.get("username", "") or "")
+        pw = str(body.get("password", "") or "")
+        tp = str(body.get("twofa", "") or "")
+        label = gh or "未保存凭据"
+        if not gh or not pw:
+            raise HTTPException(400, "需要 username + password(未保存模式不落盘)")
+
+    site = {"key": "__verify__", "name": "凭据验证",
+            "baseUrl": "https://api.justwoker.icu", "checkinType": "newapi"}
+    pseudo = {"key": f"__verify_{int(time.time() * 1000)}",
+              "alias": f"验证:{label}", "githubAccount": gh}
+    credential = {"username": gh, "password": pw, "totpSecret": tp}
+    task_id = f"verify_{int(time.time() * 1000)}"
+
+    def worker():
+        with _task_lock:
+            _verify_tasks[task_id] = {"state": "running",
+                                      "message": "验证中:请在弹出的 Chrome 里完成登录/2FA/邮箱码"}
+        try:
+            r: AuthResult = authorize(site, pseudo, cfg, credential, headful=True)
+            ok = r.state == "ok"
+            msg = ("验证通过:GitHub 登录成功,以后绑定站点直接复用"
+                   if ok else r.message)
+            with _task_lock:
+                _verify_tasks[task_id] = {
+                    "state": "ok" if ok else "failed", "message": msg,
+                    "manualUrl": r.manual_url, "login": r.github_login,
+                }
+            if cid:
+                mark_verified(cid, ok, "" if ok else r.message)
+        except Exception as e:
+            with _task_lock:
+                _verify_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+            if cid:
+                mark_verified(cid, False, str(e)[:200])
+
+    threading.Thread(target=worker, daemon=True, name=f"verify-{label}").start()
+    return {"ok": True, "task": task_id,
+            "hint": "Chrome 已弹出:账密已自动填充,2FA/邮箱码请在授权弹层填入"}
 
 
 @app.post("/api/oauth/totp")
