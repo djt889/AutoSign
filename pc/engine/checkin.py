@@ -181,11 +181,12 @@ def _account_cookies(cookie_header: str) -> list[dict]:
 
 
 def _login_rewarded_today(client: SiteClient) -> bool:
-    """login 型站点今日是否已「登录领取」:读 /api/user/self 的 last_login_time。
-
-    AgentRouter 实测:该字段随每次 OAuth 重放更新(unix 秒)。字段缺失
-    (站点变体)时返回 False ⇒ 走保守路径(每日重放一次)。
-    """
+    """login 型站点今日是否已「登录领取」:优先用今日系统奖励记录(上游 15f80fc 判据),
+    回退到 /api/user/self 的 last_login_time。"""
+    # ① 今日系统奖励记录:最可靠到账证据。接口可能返回 checked=false,但奖励日志已存在 ⇒ 已签
+    if _today_bonus(client) is not None:
+        return True
+    # ② 回退:last_login_time 今日(站点无日志变体)
     r = client.self_info()
     if r.status != 200 or not isinstance(r.data, dict):
         return False
@@ -197,6 +198,68 @@ def _login_rewarded_today(client: SiteClient) -> bool:
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") == today
     except (TypeError, ValueError):
         return False
+
+
+def _today_bonus(client: SiteClient) -> dict | None:
+    """今日「每日签到」类奖励日志(上游 todayBonus 移植)。
+    读 /api/log/self?type=4,取列表第一条「签到」类文案(排除注册/邀请/兑换),
+    时间戳是今天 ⇒ 奖励已到账。返回该记录或 None。
+    """
+    r = client.sys_log(page=1, limit=30)
+    if r.status != 200 or not isinstance(r.data, dict):
+        return None
+    d = (r.data.get("data") or {})
+    items = d.get("items") or d.get("list") or d.get("data") or []
+    if not isinstance(items, list):
+        return None
+    today = datetime.now().strftime("%Y-%m-%d")
+    for o in items:
+        if not isinstance(o, dict):
+            continue
+        text = str(o.get("content") or o.get("description") or "")
+        if not _is_checkin_text(text):
+            continue
+        ts_raw = str(o.get("created_at") or o.get("time") or "")
+        if not ts_raw:
+            continue
+        if _ts_is_today(ts_raw):
+            return {"usd": _usd_in_text(text), "text": text, "time": ts_raw}
+    return None
+
+
+def _is_checkin_text(text: str) -> bool:
+    """签到类文案;排除注册赠送/邀请赠送/兑换(与签到同为 type=4)。"""
+    t = text.lower()
+    if not ("签到" in text or "check-in" in t or "checkin" in t):
+        return False
+    return not ("注册" in text or "邀请" in text or "兑换" in text)
+
+
+def _ts_is_today(ts_raw: str) -> bool:
+    """给定时间字符串是否今天。兼容 unix 秒/毫秒与 ISO 串。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        ts = float(ts_raw)
+        if ts > 1e12:
+            ts /= 1000.0
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") == today
+    except (TypeError, ValueError):
+        try:
+            return ts_raw[:10] == today
+        except Exception:
+            return False
+
+
+def _usd_in_text(text: str) -> float | None:
+    """从日志文案解析美元金额:「获得额度 ＄20.642880 额度」→ 20.64。"""
+    import re
+    m = re.search(r"[\$￥＄美元]?\s*(\d+(?:\.\d+)?)\s*(?:额度|USD|美元)?", text)
+    if not m:
+        return None
+    try:
+        return round(float(m.group(1)), 2)
+    except ValueError:
+        return None
 
 
 # ---------- 主流程 ----------
@@ -213,14 +276,22 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
     # 的做法:每日强制静默重放一次 OAuth(=「退出后重新登录」,拿全新 session,
     # 站点 last_login_time 更新并触发发放),再刷新额度。
     if site.get("checkinType") == "login":
-        # 1) 先看今天是否已"登录领过"(last_login_time 是今日且已刷新过) ⇒ 不重复重放
-        already = _login_rewarded_today(client)
+        # 1) 先看今天是否已"登录领过":今日系统奖励记录到账 ⇒ 已签;
+        #    回退判据 last_login_time 是今日 ⇒ 不重复重放
+        bonus = _today_bonus(client)
+        already = bonus is not None or _login_rewarded_today(client)
         if already:
             report.state = "already"
-            report.message = "今日已通过登录领取(站点 last_login_time 为今日)"
+            if bonus is not None:
+                report.awarded = bonus.get("usd")
+                report.message = ("今日奖励已到账(登录即签 · 系统记录)" if bonus.get("usd")
+                                  else "今日已签(登录即签 · 无奖励)")
+            else:
+                report.message = "今日已通过登录领取(站点 last_login_time 为今日)"
             report.quota = _quota(client)
             _persist_checkin(sk, key, report)
-            db.append_log(sk, key, "checkin", {"state": "already", "type": "login"})
+            db.append_log(sk, key, "checkin", {"state": "already", "type": "login",
+                                                "bonusUSD": bonus.get("usd") if bonus else None})
             return report
 
         # 2) 强制静默重放 OAuth(等价退出重登;自动绕过 8s 复用,但受 90s 失败冷却)
@@ -237,17 +308,24 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
             account["token"] = r.token
             client.account = account
 
-        # 3) 刷新验证:last_login_time 应为今日,额度到位
-        rewarded = _login_rewarded_today(client)
+        # 3) 刷新验证:优先今日奖励记录到账,回退 last_login_time;额度到位
+        bonus = _today_bonus(client)
+        rewarded = bonus is not None or _login_rewarded_today(client)
         report.state = "done" if rewarded else "done"
-        report.message = ("重新登录完成,额度发放已触发"
-                          if rewarded else
-                          "重新登录完成(last_login_time 未更新,额度可能未发放,等下轮验证)")
+        if bonus is not None:
+            report.awarded = bonus.get("usd")
+            report.message = ("重新登录完成,奖励已到账" if bonus.get("usd")
+                              else "重新登录完成,今日已签(无奖励)")
+        else:
+            report.message = ("重新登录完成,额度发放已触发"
+                              if rewarded else
+                              "重新登录完成(last_login_time 未更新,额度可能未发放,等下轮验证)")
         report.quota = _quota(client)
         _persist_checkin(sk, key, report)
         db.append_log(sk, key, "checkin", {
             "state": "done", "type": "login-relogin",
-            "rewarded": rewarded, "availableUSD": report.quota.get("availableUSD"),
+            "rewarded": rewarded, "bonusUSD": bonus.get("usd") if bonus else None,
+            "availableUSD": report.quota.get("availableUSD"),
         })
         return report
 

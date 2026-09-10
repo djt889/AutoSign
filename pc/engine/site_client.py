@@ -196,6 +196,13 @@ class SiteClient:
             f"/api/log/self?category={category}&page={page}&limit={limit}",
         )
 
+    def sys_log(self, page: int = 1, limit: int = 30) -> CallResult:
+        """系统日志(上游契约):type=4 涵盖签到/注册赠送/邀请赠送,取最新签到记录作今日判据。"""
+        return self.call(
+            "get",
+            f"/api/log/self?type=4&page={page}&limit={limit}",
+        )
+
     # ---------- 签到流程(前置判定 → POST → 人机验证检测) ----------
 
     def checkin_flow(self) -> CheckinOutcome:
