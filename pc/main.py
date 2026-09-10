@@ -463,6 +463,46 @@ def oauth_start(body: dict):
     return {"ok": True, "task": task_id}
 
 
+@app.post("/api/oauth/manual")
+def oauth_manual(body: dict):
+    """有头浏览器授权:弹可见浏览器,凭据库有账密则自动填充,
+    用户自己完成 2FA/设备验证(如邮箱验证码)。
+    GitHub 会话存 user_data_dir,之后恢复全自动。"""
+    account_key = body.get("accountKey", "")
+    cfg = config.load()
+    found = config.find_account(cfg, account_key)
+    if not found:
+        raise HTTPException(404, "账号不存在")
+    site, acc = found
+    clear_cooldown(account_key)
+
+    task_id = f"oauth-h_{int(time.time() * 1000)}"
+
+    def worker():
+        with _task_lock:
+            _oauth_tasks[task_id] = {"state": "running",
+                                     "message": "有头授权中:请在弹出的浏览器里完成登录/验证"}
+        try:
+            cred = get_credential(account_key)
+            r: AuthResult = authorize(site, acc, cfg, cred or None, headful=True)
+            with _task_lock:
+                _oauth_tasks[task_id] = {
+                    "state": r.state, "message": r.message,
+                    "manualUrl": r.manual_url,
+                    "login": r.github_login,
+                }
+            if r.state == "ok":
+                from .engine.silent_auth import _persist
+                _persist(site, acc, r)
+        except Exception as e:
+            with _task_lock:
+                _oauth_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+
+    threading.Thread(target=worker, daemon=True, name=f"oauth-h-{account_key}").start()
+    return {"ok": True, "task": task_id,
+            "hint": "浏览器已弹出:账密已自动填充(如有),2FA/邮箱验证码请在授权弹层填入"}
+
+
 @app.get("/api/oauth/status")
 def oauth_status(task: str):
     with _task_lock:
