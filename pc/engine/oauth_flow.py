@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -339,7 +341,7 @@ def authorize(site: dict, account: dict, cfg: dict,
         holder["github_ok"] = False   # 超时
 
     kwargs: dict[str, Any] = dict(
-        headless=not headful, solve_cloudflare=True,
+        solve_cloudflare=True,
         # 不用 network_idle:AgentRouter console 页持续轮询,idle 永不满足,
         # page_action 会被卡到 timeout(实测);等待逻辑由 action 内循环承担
         timeout=600000 if headful else 180000,   # 有头模式给 10 分钟现场操作
@@ -348,6 +350,18 @@ def authorize(site: dict, account: dict, cfg: dict,
         # 捕获前端自发交换请求的响应(文档 §5.2 首选手段,URL 链判定之外的保险)
         capture_xhr=r"/api/oauth/",
     )
+    if headful:
+        # 有头模式:CDP 接管用户真实 Chrome(真窗口可见)。
+        # 原因:scrapling 0.4.11 底层 patchright 的 headless=False 不弹真实窗口,
+        # 必须连用户 Chrome 的远程调试端口才能让人看到并操作。
+        ok, msg = ensure_manual_chrome()
+        db.append_log(sk, ak, "oauth", {"step": "manual-chrome", "ok": ok, "msg": msg[:80]})
+        if not ok:
+            return AuthResult("failed", msg)
+        kwargs["cdp_url"] = manual_cdp_url()
+        kwargs.pop("user_data_dir", None)  # CDP 接管时 profile 由 Chrome 进程侧管理
+    else:
+        kwargs["headless"] = True
     proxy = _proxy_url(cfg)
     if proxy:
         kwargs["proxy"] = proxy
@@ -595,3 +609,80 @@ def _proxy_url(cfg: dict) -> str | None:
     if not p.get("enabled"):
         return None
     return f"{p.get('type', 'socks5')}://{p.get('host', '127.0.0.1')}:{p.get('port', 10808)}"
+
+
+# ---------- 有头授权:CDP 接管用户真实 Chrome ----------
+
+MANUAL_CDP_PORT = 19222
+MANUAL_PROFILE_DIR = "manual-chrome-profile"
+
+
+def manual_profile_dir() -> str:
+    """手动授权专用 Chrome profile(独立目录,不污染用户日常配置)。"""
+    from ..service.config import ROOT
+    d = ROOT / "data" / MANUAL_PROFILE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
+
+def ensure_manual_chrome() -> tuple[bool, str]:
+    """启动带远程调试端口的用户真实 Chrome(有头可见)。
+
+    返回 (ok, msg)。Chrome 已在该端口监听则直接复用。
+    """
+    import json as _json
+    import subprocess
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{MANUAL_CDP_PORT}/json/version", timeout=3) as r:
+            info = _json.loads(r.read().decode("utf-8", "replace"))
+            if info.get("webSocketDebuggerUrl"):
+                return True, "已连接已有 Chrome 调试会话"
+    except Exception:
+        pass
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    exe = next((c for c in candidates if os.path.exists(c)), None)
+    if not exe:
+        return False, "未找到 Chrome,请先安装 Google Chrome"
+    try:
+        subprocess.Popen(
+            [exe, f"--remote-debugging-port={MANUAL_CDP_PORT}",
+             f"--user-data-dir={manual_profile_dir()}",
+             "--no-first-run", "--no-default-browser-check",
+             "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        return False, f"Chrome 启动失败: {e}"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{MANUAL_CDP_PORT}/json/version", timeout=2) as r:
+                info = _json.loads(r.read().decode("utf-8", "replace"))
+                if info.get("webSocketDebuggerUrl"):
+                    return True, "Chrome 已弹出,请在窗口里完成登录/验证"
+        except Exception:
+            pass
+        time.sleep(1)
+    return False, "Chrome 调试端口无响应,请检查 Chrome 是否被拦截"
+
+
+def manual_cdp_url() -> str:
+    """返回 ws:// 调试地址(scrapling 的 cdp_url 只接受 ws/wss scheme)。"""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{MANUAL_CDP_PORT}/json/version", timeout=3) as r:
+            info = _json.loads(r.read().decode("utf-8", "replace"))
+            ws = info.get("webSocketDebuggerUrl") or ""
+            if ws.startswith("ws"):
+                return ws
+    except Exception:
+        pass
+    return f"ws://127.0.0.1:{MANUAL_CDP_PORT}"
