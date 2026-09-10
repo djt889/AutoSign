@@ -402,11 +402,11 @@ async function startAuto(k){const gh=$('#af_gh').value.trim(),pw=$('#af_pw').val
 async function startOAuth(k,mode){busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
   const t=await post(mode==='auto'?'/oauth/start':'/oauth/manual',{accountKey:k});
   if(!t.task){busy(false);toast(t.detail||'发起失败');return;}
-  /* 授权进行中弹层:显示进度 + 可随时填入手机 6 位 2FA 码(30s 有效,注入后自动使用) */
+  /* 授权进行中弹层:显示进度 + 可随时填入手机 2FA 码或邮箱验证码(6 位,注入后自动使用) */
   openSheet('授权进行中',`<div class="hint" id="oaMsg">…</div>
-  <div class="fld" style="margin-top:8px"><label>手机 2FA 6 位码(全自动凭据无 2FA 密钥/或码失效时手动补)</label>
-    <input id="oa_totp" inputmode="numeric" maxlength="6" placeholder="如 482913,30秒内有效"></div>
-  <button class="btn lb w100" onclick="sendTotp()">注入 2FA 码</button>`);
+  <div class="fld" style="margin-top:8px"><label>6 位验证码(手机 2FA App 或 GitHub 发到登录邮箱的设备验证码,30 秒内有效)</label>
+    <input id="oa_totp" inputmode="numeric" maxlength="6" placeholder="App 或邮件里的 6 位数字,收到就填"></div>
+  <button class="btn lb w100" onclick="sendTotp()">注入验证码</button>`);
   const tick=async()=>{
     const s=await api('/oauth/status?task='+t.task);
     const m=$('#oaMsg');
@@ -470,7 +470,7 @@ function credFormSheet(cid){
   <div class="fld"><label>GitHub 密码${cid?`（${c.hasPassword?'当前: 已配置(●●●●)':'未配置'}，留空=保留）`:''}</label>
     <input id="cf_pw" type="password" placeholder="${cid?'留空保留原密码':'必填，用于自动授权'}"></div>
   <div class="fld"><label>TOTP 密钥(2FA setup key)${cid?`（${c.hasTwofa?'当前: 已配置':'未配置'}，留空=保留）`:''}</label>
-    <input id="cf_tp" placeholder="如 JBSWY3DPEHPK3PXP，留空保留/不配"></div>
+    <input id="cf_tp" placeholder="GitHub给的16位密钥，留空保留/不配"></div>
   <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>
   ${cid?`<button class="btn r w100" onclick="clearCredPw('${cid}')">清除密码(切为手动授权模式)</button>`:''}`);
 }

@@ -25,9 +25,11 @@ from ..service import config as config_svc
 from ..service import db
 from .site_client import CallResult, SiteClient
 
-# GitHub 会话过期 ⇒ 需要人工(SilentAuth 契约:转人工 URL 清单)
+# GitHub 会话过期 ⇒ 需要人工(SilentAuth 契约:转人工 URL 清单)。
+# verified-device/device = GitHub 新设备验证(含邮箱验证码 - 设备验证邮件里的
+# 6 位数字码同样走本页输入,与 TOTP 无关,见 _fill_totp 的 email-code 分支)
 NEED_MANUAL_URL_RE = re.compile(
-    r"github\.com/(login|session|sessions)|/two-factor|verified-device|/sudo",
+    r"github\.com/(login|session|sessions)|/two-factor|verified-device|/device|/sudo",
     re.IGNORECASE,
 )
 
@@ -314,16 +316,17 @@ def authorize(site: dict, account: dict, cfg: dict,
             if on_wall and credential and not headful:
                 # headless:2FA 页必须先判(/sessions/two-factor 含 "/session",
                 # 若登录分支在前,2FA 页会被吞掉导致永远填不进码);
-                # 登录页填账密(一次);2FA 页轮询填码(密钥码/手动码)
-                if "two-factor" in url:
+                # 登录页填账密(一次);2FA/设备验证页轮询填码(密钥码/手动码/邮箱码)
+                if "two-factor" in url or "verified-device" in url or "/device" in url:
                     _fill_totp(page, credential)
                 elif "login" in url or "/session" in url:
                     if not filled["login"] and _fill_login(page, credential):
                         filled["login"] = True
                 page.wait_for_timeout(2000)
                 continue
-            if on_wall and headful and "two-factor" in url and globals()["_manual_code"]:
-                # 有头模式:用户手机上的码通过 API 发来,直接注入(30s 窗口)
+            if on_wall and headful and ("two-factor" in url or "verified-device" in url
+                                        or "/device" in url) and globals()["_manual_code"]:
+                # 有头模式:用户手机/邮箱上的码通过 API 发来,直接注入(30s 窗口)
                 _fill_totp(page, credential or {})
                 globals()["_manual_code"] = ""
                 page.wait_for_timeout(2000)
@@ -537,18 +540,30 @@ def _fill_totp(page, credential: dict) -> bool:
     """2FA 页:默认非 TOTP 时先切「Use authenticator app」,再填 6 位码。
 
     TOTP 码满 6 位自动提交;无 TOTP 密钥 ⇒ False(交人工)。
+
+    邮箱验证码页(verified-device/device):GitHub 给登录邮箱发 6 位数字码,
+    同样走 6 位输入框提交 —— _manual_code(前端填码框注入,见 /api/oauth/totp)
+    在此分支同样生效,无需 TOTP 密钥。
     """
-    code = globals().get("_manual_code", "") or _totp_code(credential)
+    url = ""
+    try:
+        url = page.url or ""
+    except Exception:
+        pass
+    is_email_code = ("verified-device" in url) or ("/device" in url and "two-factor" not in url)
+    code = globals().get("_manual_code", "") or ("" if is_email_code else _totp_code(credential))
     if not code:
         return False
     try:
-        link = page.locator(
-            "a:has-text('authenticator'), button:has-text('authenticator')")
-        if link.count():
-            link.first.click()
-            page.wait_for_timeout(1500)
+        if not is_email_code:
+            link = page.locator(
+                "a:has-text('authenticator'), button:has-text('authenticator')")
+            if link.count():
+                link.first.click()
+                page.wait_for_timeout(1500)
         otp = page.locator(
-            "#app_totp, #otp, input[autocomplete='one-time-code']").first
+            "#app_totp, #otp, #device-code, input[autocomplete='one-time-code'], "
+            "input[name='code'], input[inputmode='numeric']").first
         otp.fill(code)                       # 满 6 位 GitHub 自动提交
         return True
     except Exception:

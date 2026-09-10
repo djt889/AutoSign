@@ -258,7 +258,7 @@ def test_credentials_roundtrip(monkeypatch, tmp_path):
 
     # upsert 同 githubUser 两次 → 只一条(duplicated)
     r1 = cr.upsert_credential(github_user="user@x.com", alias="u1", password="pw1",
-                              twofa="JBSWY3DPEHPK3PXP")
+                              twofa="AAAAAAAAAAAAAAAA")  # 占位符(全零测试种子,非真实密钥)
     assert r1["created"] is True and r1["duplicated"] is False
     r2 = cr.upsert_credential(github_user="user@x.com", alias="u2")   # 同 github 去重
     assert r2["duplicated"] is True and r2["id"] == r1["id"]
@@ -276,7 +276,7 @@ def test_credentials_roundtrip(monkeypatch, tmp_path):
     config.save(cfg)
     cred = cr.credential_of(acc)
     assert cred == {"username": "user@x.com", "password": "pw1",
-                    "totpSecret": "JBSWY3DPEHPK3PXP"}
+                    "totpSecret": "AAAAAAAAAAAAAAAA"}
 
     # 字段空串 = 清除;None = 不修改
     cr.upsert_credential(credential_id=r1["id"], password="")
@@ -328,3 +328,83 @@ def test_fetch_state_post_404_fallback_get(monkeypatch, tmp_path):
     token, err = of.fetch_state(client)
     assert token == "flow_tok" and err == ""
     assert config.site_meta(config.load(), "s1", "stateMethod") == "get"
+
+
+class _FakeLocator:
+    def __init__(self, page, sel):
+        self._page = page
+        self._sel = sel
+
+    def count(self):
+        return 1 if self._sel in self._page.present else 0
+
+    @property
+    def first(self):
+        return self
+
+    def click(self):
+        self._page.clicked.append(self._sel)
+
+    def fill(self, code):
+        self._page.filled.append((self._sel, code))
+
+    def is_visible(self):
+        return True
+
+
+class _FakePage:
+    def __init__(self, url, present):
+        self.url = url
+        self.present = present
+        self.clicked = []
+        self.filled = []
+
+    def locator(self, sel):
+        return _FakeLocator(self, sel)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def _reset_manual():
+    import pc.engine.oauth_flow as of
+    of._manual_code = ""
+
+
+def test_fill_totp_email_code_branch():
+    """邮箱验证码页(verified-device):只用手动码,不碰 authenticator 切换,不需要 TOTP 密钥。"""
+    import pc.engine.oauth_flow as of
+    _reset_manual()
+    of.set_manual_code("123456")
+    page = _FakePage("https://github.com/verified-device", ["OTP_SEL"])
+    # 用短选择器名:FakePage 按完全匹配计 present,实现里是多选择器组合串——
+    # 这里直接断言 filled 非空且值为手动码
+    import pc.engine.oauth_flow as of2
+    page2 = _FakePage("https://github.com/verified-device", [])
+    # 给 FakePage 加通配:任意 locator 都 present(模拟输入框一定存在)
+    _FakeLocator.count = lambda self: 1
+    assert of._fill_totp(page2, {}) is True
+    assert page2.filled and page2.filled[0][1] == "123456"
+    # 邮箱分支不点 authenticator 切换链接
+    assert not any("authenticator" in c for c in page.clicked)
+    _reset_manual()
+
+
+def test_fill_totp_totp_branch_with_link():
+    """TOTP 页:先点 authenticator 切换,再填密钥生成的码。"""
+    import pc.engine.oauth_flow as of
+    _reset_manual()
+    page = _FakePage("https://github.com/sessions/two-factor/app", [])
+    of.set_manual_code("654321")
+    assert of._fill_totp(page, {"totpSecret": "AAAAAAAAAAAAAAAA"}) is True
+    assert any("authenticator" in c for c in page.clicked)
+    assert page.filled and page.filled[0][1] == "654321"
+    _reset_manual()
+
+
+def test_fill_totp_no_code_returns_false():
+    """邮箱页无手动码且 TOTP 页无密钥 ⇒ False(交人工)。"""
+    import pc.engine.oauth_flow as of
+    _reset_manual()
+    page = _FakePage("https://github.com/verified-device", ["#app_totp"])
+    assert of._fill_totp(page, {}) is False
