@@ -216,10 +216,15 @@ class SiteClient:
             data = month_raw.data.get("data") or {}
             stats = data.get("stats") or {}
             today = datetime.now().strftime("%Y-%m-%d")
-            records = data.get("records") or []
+            # 记录层级兼容:实测 JustDoWork 把 records 放在 stats.records 内,
+            # 顶层 records 为空;两种位置都取(否则今日签到记录永远找不到)
+            records = data.get("records") or stats.get("records") or []
+            if not isinstance(records, list):
+                records = []
             today_rec = next(
                 (r for r in records
-                 if str(r.get("checkin_date") or r.get("date") or "") == today),
+                 if isinstance(r, dict)
+                 and str(r.get("checkin_date") or r.get("date") or "") == today),
                 None,
             )
             if stats.get("checked_in_today") or today_rec:
@@ -231,9 +236,10 @@ class SiteClient:
                         awarded=round(float(today_rec["quota_awarded"]) / unit, 2),
                         message="今日已签到",
                     )
-                if today_rec is not None:
-                    return CheckinOutcome("already", message="今日已签到(本站无签到奖励)")
-                return CheckinOutcome("already", message="今日已签到")
+                if stats.get("checked_in_today") and today_rec is None:
+                    # 已签但记录层级不同:按 stats 已签判定,金额留给额度差推断
+                    return CheckinOutcome("already", message="今日已签到")
+                return CheckinOutcome("already", message="今日已签到(本站无签到奖励)")
 
         # 未签(或查询失败)⇒ POST
         post = self.checkin_post()

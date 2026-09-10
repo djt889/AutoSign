@@ -161,21 +161,22 @@ def get_settings():
 
 @app.post("/api/settings/save")
 def settings_save(body: dict):
-    cfg = config.load()
-    if isinstance(body.get("schedule"), dict):
-        s = body["schedule"]
-        cfg["schedule"] = {
-            "enabled": bool(s.get("enabled")),
-            "time": str(s.get("time") or "09:05"),
-        }
-    if isinstance(body.get("proxy"), dict):
-        p = body["proxy"]
-        cfg["proxy"] = {
-            "enabled": bool(p.get("enabled")), "type": "socks5",
-            "host": str(p.get("host") or "127.0.0.1"),
-            "port": int(p.get("port") or 10808),
-        }
-    config.save(cfg)
+    def _mut(cfg):
+        if isinstance(body.get("schedule"), dict):
+            s = body["schedule"]
+            cfg["schedule"] = {
+                "enabled": bool(s.get("enabled")),
+                "time": str(s.get("time") or "09:05"),
+            }
+        if isinstance(body.get("proxy"), dict):
+            p = body["proxy"]
+            cfg["proxy"] = {
+                "enabled": bool(p.get("enabled")), "type": "socks5",
+                "host": str(p.get("host") or "127.0.0.1"),
+                "port": int(p.get("port") or 10808),
+            }
+
+    cfg = config.update(_mut)
     start_scheduler()          # 保存即生效(重启或停用)
     db.append_log("*", "*", "settings-save",
                   {"schedule": cfg.get("schedule"), "proxyEnabled": (cfg.get("proxy") or {}).get("enabled")})
@@ -195,17 +196,20 @@ def run_all():
 def seal_existing():
     """迁移:把存量明文 token/siteCookie 一次性加密(幂等)。"""
     from .service.secret_store import seal_account
-    cfg = config.load()
-    n = 0
-    for s in cfg.get("sites", []):
-        for a in s.get("accounts") or []:
-            before_token, before_ck = a.get("token"), a.get("siteCookie")
-            seal_account(a)
-            if (before_token and str(before_token) != a.get("token")) or                (before_ck and str(before_ck) != a.get("siteCookie")):
-                n += 1
-    config.save(cfg)
-    db.append_log("*", "*", "seal-existing", {"sealed_accounts": n})
-    return {"ok": True, "sealed_accounts": n}
+    counter = {"n": 0}
+
+    def _mut(cfg):
+        for s in cfg.get("sites", []):
+            for a in s.get("accounts") or []:
+                before_token, before_ck = a.get("token"), a.get("siteCookie")
+                seal_account(a)
+                if (before_token and str(before_token) != a.get("token")) or \
+                        (before_ck and str(before_ck) != a.get("siteCookie")):
+                    counter["n"] += 1
+
+    config.update(_mut)
+    db.append_log("*", "*", "seal-existing", {"sealed_accounts": counter["n"]})
+    return {"ok": True, "sealed_accounts": counter["n"]}
 
 
 @app.get("/api/events")
@@ -286,88 +290,106 @@ def sites_save(body: dict):
         base_url = "https://" + base_url
     checkin_type = "manual" if body.get("checkinType") == "manual" else (
         "newapi" if body.get("checkinType") == "newapi" else "login")
-    cfg = config.load()
-    if body.get("key"):
-        s = next((x for x in cfg["sites"] if x["key"] == body["key"]), None)
-        if not s:
-            raise HTTPException(404, "站点不存在")
-        s["name"] = body.get("name") or s.get("name")
-        s["baseUrl"] = base_url
-        s["checkinType"] = checkin_type
-    else:
-        key = config.site_key_of(base_url)
-        if any(x["key"] == key for x in cfg["sites"]):
-            raise HTTPException(409, "该站点已存在(按地址识别)")
-        cfg["sites"].append({
-            "key": key, "name": body.get("name") or key,
-            "baseUrl": base_url, "checkinType": checkin_type, "accounts": [],
-        })
-    config.save(cfg)
-    db.append_log(body.get("key") or key, "*", "site-save", {"baseUrl": base_url})
+    out = {"key": ""}
+
+    def _mut(cfg):
+        if body.get("key"):
+            s = next((x for x in cfg["sites"] if x["key"] == body["key"]), None)
+            if not s:
+                raise HTTPException(404, "站点不存在")
+            s["name"] = body.get("name") or s.get("name")
+            s["baseUrl"] = base_url
+            s["checkinType"] = checkin_type
+            out["key"] = body["key"]
+        else:
+            key = config.site_key_of(base_url)
+            if any(x["key"] == key for x in cfg["sites"]):
+                raise HTTPException(409, "该站点已存在(按地址识别)")
+            cfg["sites"].append({
+                "key": key, "name": body.get("name") or key,
+                "baseUrl": base_url, "checkinType": checkin_type, "accounts": [],
+            })
+            out["key"] = key
+
+    cfg = config.update(_mut)
+    db.append_log(out["key"], "*", "site-save", {"baseUrl": base_url})
     return {"ok": True, "sites": [_mask_site(s) for s in cfg["sites"]]}
 
 
 @app.delete("/api/sites/{site_key}")
 def sites_delete(site_key: str):
-    cfg = config.load()
-    before = len(cfg["sites"])
-    cfg["sites"] = [s for s in cfg["sites"] if s["key"] != site_key]
-    if len(cfg["sites"]) == before:
+    found = {"ok": False}
+
+    def _mut(cfg):
+        before = len(cfg["sites"])
+        cfg["sites"] = [s for s in cfg["sites"] if s["key"] != site_key]
+        found["ok"] = len(cfg["sites"]) != before
+        if found["ok"]:
+            config.mark_builtin_removed(cfg, site_key)     # 内置站删除后不复活
+
+    config.update(_mut)
+    if not found["ok"]:
         raise HTTPException(404, "站点不存在")
-    config.mark_builtin_removed(cfg, site_key)     # 内置站删除后不复活
-    config.save(cfg)
     db.append_log(site_key, "*", "site-delete", None)
     return {"ok": True}
 
 
 @app.post("/api/accounts/save")
 def accounts_save(body: dict):
-    cfg = config.load()
-    site = next((s for s in cfg["sites"] if s["key"] == body.get("siteKey")), None)
-    if not site:
-        raise HTTPException(400, "siteKey 无效")
-    site.setdefault("accounts", [])
-    key = body.get("key") or f"acc_{int(time.time() * 1000)}"
-    acc = next((a for a in site["accounts"] if a["key"] == key), None)
-    if not acc:
-        acc = {"key": key, "alias": body.get("alias") or key}
-        site["accounts"].append(acc)
-    if body.get("alias"):
-        acc["alias"] = str(body["alias"]).strip()
-    # 凭据库引用(原版模型):绑定的凭据决定 githubAccount / 自动填充
-    if body.get("credentialId"):
-        acc["credentialId"] = body["credentialId"]
-        for _c in (cfg.get("credentials") or []):
-            if _c.get("id") == body["credentialId"]:
-                gh = _c.get("githubUser") or _c.get("siteAccount") or ""
-                if gh:
-                    acc["githubAccount"] = gh
-                break
+    """新增/更新账号。原子事务:并发(签到/刷新/授权)时不互相覆盖丢账号
+    ——这是"前端拿旧 key 报账号不存在"的根因。"""
     from .service.secret_store import seal
-    for f in ("githubAccount", "siteUserId"):
-        if body.get(f) is not None:
-            acc[f] = body[f]
-    for f in ("token", "siteCookie"):
-        if body.get(f) is not None:
-            acc[f] = seal(body[f])
-    acc["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    config.save(cfg)
-    db.append_log(site["key"], key, "account-save", {"hasToken": bool(acc.get("token"))})
-    return {"ok": True, "key": key}
+    out = {"key": ""}
+
+    def _mut(cfg):
+        site = next((s for s in cfg["sites"] if s["key"] == body.get("siteKey")), None)
+        if not site:
+            raise HTTPException(400, "siteKey 无效")
+        site.setdefault("accounts", [])
+        key = body.get("key") or f"acc_{int(time.time() * 1000)}"
+        acc = next((a for a in site["accounts"] if a["key"] == key), None)
+        if not acc:
+            acc = {"key": key, "alias": body.get("alias") or key}
+            site["accounts"].append(acc)
+        if body.get("alias"):
+            acc["alias"] = str(body["alias"]).strip()
+        # 凭据库引用(原版模型):绑定的凭据决定 githubAccount / 自动填充
+        if body.get("credentialId"):
+            acc["credentialId"] = body["credentialId"]
+            for _c in (cfg.get("credentials") or []):
+                if _c.get("id") == body["credentialId"]:
+                    gh = _c.get("githubUser") or _c.get("siteAccount") or ""
+                    if gh:
+                        acc["githubAccount"] = gh
+                    break
+        for f in ("githubAccount", "siteUserId"):
+            if body.get(f) is not None:
+                acc[f] = body[f]
+        for f in ("token", "siteCookie"):
+            if body.get(f) is not None:
+                acc[f] = seal(body[f])
+        acc["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        out["key"] = key
+
+    config.update(_mut)
+    db.append_log(body.get("siteKey", "*"), out["key"], "account-save", {"hasToken": bool(body.get("token"))})
+    return {"ok": True, "key": out["key"]}
 
 
 @app.delete("/api/accounts/{account_key}")
 def accounts_delete(account_key: str):
-    cfg = config.load()
-    removed = False
-    for s in cfg["sites"]:
-        n = len(s.get("accounts") or [])
-        s["accounts"] = [a for a in (s.get("accounts") or []) if a["key"] != account_key]
-        if len(s["accounts"]) < n:
-            removed = True
-    if not removed:
+    found = {"ok": False}
+
+    def _mut(cfg):
+        for s in cfg["sites"]:
+            n = len(s.get("accounts") or [])
+            s["accounts"] = [a for a in (s.get("accounts") or []) if a["key"] != account_key]
+            if len(s["accounts"]) < n:
+                found["ok"] = True
+
+    config.update(_mut)
+    if not found["ok"]:
         raise HTTPException(404, "账号不存在")
-    config.save(cfg)
     db.append_log("*", account_key, "account-delete", None)
     return {"ok": True}
 

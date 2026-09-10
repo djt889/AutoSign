@@ -80,6 +80,43 @@ def test_config_site_meta(tmp_path, monkeypatch):
     assert config.site_meta(cfg, "s1", "missing", "dft") == "dft"
 
 
+def test_config_update_atomic_no_lost_write(tmp_path, monkeypatch):
+    """回归:并发 load→改→save 会丢账号(实测 90 条只落盘 34 条)。
+
+    config.update 保证整段 load→mutator→save 在锁内原子完成,并发不再覆盖。
+    """
+    import threading
+    from pc.service import config
+    monkeypatch.setattr(config, "CFG_PATH", tmp_path / "config.json")
+    cfg = config.load()
+    cfg["sites"].append({"key": "s1", "name": "站1", "baseUrl": "https://s1.com",
+                         "checkinType": "newapi", "accounts": []})
+    config.save(cfg)
+
+    N_THREADS, N_EACH = 6, 15
+
+    def add_many(tag):
+        for i in range(N_EACH):
+            key = "acc_%s_%d" % (tag, i)
+
+            def _mut(c):
+                s = next((x for x in c["sites"] if x["key"] == "s1"), None)
+                if s is not None:
+                    s.setdefault("accounts", []).append({"key": key})
+
+            config.update(_mut)
+
+    threads = [threading.Thread(target=add_many, args=("t%d" % i,)) for i in range(N_THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    cfg2 = config.load()
+    site = next(x for x in cfg2["sites"] if x["key"] == "s1")
+    assert len(site["accounts"]) == N_THREADS * N_EACH  # 一条都不能丢
+
+
 # ---------- db ----------
 
 def test_db_append_and_recent(tmp_path, monkeypatch):

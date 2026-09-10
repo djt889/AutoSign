@@ -231,6 +231,29 @@ def test_checkin_already_zero_award():
     assert "无签到奖励" in out.message
 
 
+def test_checkin_already_records_inside_stats():
+    """回归:JustDoWork 把 records 放在 stats.records 内(顶层 records 为空)。
+
+    旧实现只读 data.records ⇒ 找不到今日记录,金额丢失;必须兼容 stats.records。
+    """
+    import datetime as dt
+    today, month = dt.date.today().strftime("%Y-%m-%d"), dt.date.today().strftime("%Y-%m")
+    c = make_client({"token": "t"})
+    c, ft = bind(c, {
+        "/api/status": CallResult(ok=True, status=200, raw=_status_ok()),
+        f"month={month}": CallResult(ok=True, status=200, raw=json.dumps({
+            "data": {"stats": {"checked_in_today": True,
+                               "records": [{"checkin_date": today, "quota_awarded": 12749913}]},
+                     "records": []}
+        })),
+    })
+    out = c.checkin_flow()
+    assert out.state == "already"
+    assert out.awarded == 25.5  # 12749913 / 500000,四舍五入
+    # 已签且能读到记录时,不应再 POST 签到(防重复签到)
+    assert not any(c0.startswith("post /api/user/checkin") for c0, _ in ft.calls)
+
+
 def test_checkin_not_done_then_post_success():
     """未签 ⇒ POST 成功,带金额。"""
     import datetime as dt

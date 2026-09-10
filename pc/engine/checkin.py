@@ -422,19 +422,25 @@ def _finish(report: CheckinReport, client: SiteClient, sk: str, key: str) -> Non
 
 
 def _persist_checkin(site_key: str, account_key: str, report: CheckinReport) -> None:
-    """签到记录落盘(幂等:只记录,前端按 date 判定今日状态)。"""
+    """签到记录落盘(幂等:只记录,前端按 date 判定今日状态)。
+
+    走 config.update 原子事务:并发签到/刷新时不再互相覆盖丢账号。
+    """
     from ..service import config as config_svc
-    cfg = config_svc.load()
-    found = config_svc.find_account(cfg, account_key)
-    if not found:
-        return
-    _, a = found
-    a["lastCheckin"] = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "state": report.state,
-        "reward": report.awarded,
-    }
-    config_svc.save(cfg)
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    def _mut(cfg):
+        found = config_svc.find_account(cfg, account_key)
+        if not found:
+            return
+        _, a = found
+        a["lastCheckin"] = {
+            "date": date,
+            "state": report.state,
+            "reward": report.awarded,
+        }
+
+    config_svc.update(_mut)
 
 
 def _quota(client: SiteClient) -> dict:

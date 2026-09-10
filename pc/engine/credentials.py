@@ -14,7 +14,7 @@ import json
 from typing import Any
 
 from ..service import config as config_svc
-from ..service import crypto
+from ..service import crypto, db
 
 
 def _load_creds(cfg: dict) -> list[dict]:
@@ -62,19 +62,23 @@ def list_credentials(secrets: bool = False) -> list[dict]:
 def mark_verified(credential_id: str, ok: bool, error: str = "") -> bool:
     """写验证结果:ok ⇒ verified=ok + verifiedAt=now;失败 ⇒ verified=failed + 原因。"""
     import time as _time
-    cfg = config_svc.load()
-    c = _find(cfg, credential_id)
-    if not c:
-        return False
-    if ok:
-        c["verified"] = "ok"
-        c["verifiedAt"] = str(_time.time())
-        c.pop("verifyError", None)
-    else:
-        c["verified"] = "failed"
-        c["verifyError"] = error[:200]
-    config_svc.save(cfg)
-    return True
+    found = {"ok": False}
+
+    def _mut(cfg):
+        c = _find(cfg, credential_id)
+        if not c:
+            return
+        found["ok"] = True
+        if ok:
+            c["verified"] = "ok"
+            c["verifiedAt"] = str(_time.time())
+            c.pop("verifyError", None)
+        else:
+            c["verified"] = "failed"
+            c["verifyError"] = error[:200]
+
+    config_svc.update(_mut)
+    return found["ok"]
 
 
 def upsert_credential(alias: str = "", github_user: str = "", site_account: str = "",
@@ -85,59 +89,88 @@ def upsert_credential(alias: str = "", github_user: str = "", site_account: str 
     同 githubUser 已存在 ⇒ 返回已有条目(不重复建);显式传 credential_id 则更新它。
     返回 {id, created: bool, duplicated: bool}。
     """
-    cfg = config_svc.load()
-    creds = _load_creds(cfg)
-
     target = None
     created = duplicated = False
-    if credential_id:
-        target = _find(cfg, credential_id)
+
+    def _mut(cfg):
+        nonlocal target, created, duplicated
+        creds = _load_creds(cfg)
+        if credential_id:
+            target = _find(cfg, credential_id)
+            if not target:
+                raise ValueError("凭据不存在: " + credential_id)
+        elif github_user:
+            target = next((c for c in creds
+                           if (c.get("githubUser") or "").lower() == github_user.lower()), None)
+            duplicated = target is not None
         if not target:
-            raise ValueError("凭据不存在: " + credential_id)
-    elif github_user:
-        target = next((c for c in creds
-                       if (c.get("githubUser") or "").lower() == github_user.lower()), None)
-        duplicated = target is not None
-    if not target:
-        target = {"id": "cred_" + str(__import__("time").time() * 1000).split(".")[0]}
-        creds.append(target)
-        created = True
+            target = {"id": "cred_" + str(__import__("time").time() * 1000).split(".")[0]}
+            creds.append(target)
+            created = True
 
-    if alias:
-        target["alias"] = alias
-    if github_user:
-        target["githubUser"] = github_user
-    if site_account:
-        target["siteAccount"] = site_account
-    if password is not None:
-        target["password"] = crypto.encrypt(password) if password else ""
-    if twofa is not None:
-        target["twofa"] = crypto.encrypt(twofa) if twofa else ""
-    if note:
-        target["note"] = note
+        if alias:
+            target["alias"] = alias
+        if github_user:
+            target["githubUser"] = github_user
+        if site_account:
+            target["siteAccount"] = site_account
+        if password is not None:
+            target["password"] = crypto.encrypt(password) if password else ""
+        if twofa is not None:
+            target["twofa"] = crypto.encrypt(twofa) if twofa else ""
+        if note:
+            target["note"] = note
+        cfg["credentials"] = creds
 
-    cfg["credentials"] = creds
-    config_svc.save(cfg)
+    config_svc.update(_mut)
     return {"id": target["id"], "created": created, "duplicated": duplicated}
 
 
 def delete_credential(cid: str) -> bool:
-    cfg = config_svc.load()
-    creds = _load_creds(cfg)
-    before = len(creds)
-    cfg["credentials"] = [c for c in creds if c.get("id") != cid]
-    if len(cfg["credentials"]) == before:
-        return False
-    config_svc.save(cfg)
-    return True
+    removed = {"ok": False}
+
+    def _mut(cfg):
+        creds = _load_creds(cfg)
+        kept = [c for c in creds if c.get("id") != cid]
+        removed["ok"] = len(kept) != len(creds)
+        cfg["credentials"] = kept
+
+    config_svc.update(_mut)
+    return removed["ok"]
 
 
 def credential_of(account: dict) -> dict[str, str]:
-    """账号的凭据(明文):优先 credentialId 引用;回退旧 encCredential。"""
+    """账号的凭据(明文):优先 credentialId 引用;回退旧 encCredential。
+
+    credentialId 断链自愈:引用在凭据库不存在(被删/孤儿)时,按账号
+    githubAccount 匹配到同名凭据则自动重绑定并回填引用,避免空凭据。
+    """
     cfg = config_svc.load()
     cid = account.get("credentialId") or ""
     if cid:
         c = _find(cfg, cid)
+        if not c:
+            # 断链自愈:按 githubAccount 找同名凭据重绑定(原子事务回填,防并发覆盖)
+            gh = account.get("githubAccount") or ""
+            ak = account.get("key") or ""
+            if gh:
+                alt = next((x for x in _load_creds(cfg)
+                            if (x.get("githubUser") or x.get("siteAccount") or "") == gh), None)
+                if alt:
+                    new_id = alt["id"]
+                    if ak:
+                        def _mut(ccfg):
+                            found = config_svc.find_account(ccfg, ak)
+                            if found:
+                                found[1]["credentialId"] = new_id
+                                found[1]["updatedAt"] = __import__("time").strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+
+                        config_svc.update(_mut)
+                        account["credentialId"] = new_id
+                    c = alt
+            db.append_log(ak or "?", ak or "?", "credential-rebind",
+                          {"from": cid, "to": c["id"] if c else None, "by": "githubAccount"})
         if c:
             cred = {"username": c.get("githubUser") or c.get("siteAccount") or "",
                     "password": "", "totpSecret": ""}

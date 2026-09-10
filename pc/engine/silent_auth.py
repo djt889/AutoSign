@@ -73,25 +73,28 @@ def _persist(site: dict, account: dict, r: AuthResult) -> None:
     """落盘:token/siteCookie/siteUserId/github 锚点;任一变化即算成功。
 
     token/siteCookie 落盘前加密(AES-256-GCM,§7 凭据安全)。
+    走 config.update 原子事务(并发换凭据不丢账号)。
     """
     from ..service.secret_store import seal
-    cfg = config_svc.load()
-    found = config_svc.find_account(cfg, account["key"])
-    if not found:
-        return
-    s, a = found
-    if r.token:
-        a["token"] = seal(r.token)
-    if r.site_cookie:
-        a["siteCookie"] = seal(r.site_cookie)
-    if r.site_user_id:
-        a["siteUserId"] = r.site_user_id
-    if r.github_login:
-        a["githubAccount"] = r.github_login
-    if r.github_id:
-        a["githubId"] = r.github_id
-    a["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    config_svc.save(cfg)
+
+    def _mut(cfg):
+        found = config_svc.find_account(cfg, account["key"])
+        if not found:
+            return
+        _, a = found
+        if r.token:
+            a["token"] = seal(r.token)
+        if r.site_cookie:
+            a["siteCookie"] = seal(r.site_cookie)
+        if r.site_user_id:
+            a["siteUserId"] = r.site_user_id
+        if r.github_login:
+            a["githubAccount"] = r.github_login
+        if r.github_id:
+            a["githubId"] = r.github_id
+        a["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    config_svc.update(_mut)
 
 
 def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = None,
@@ -138,11 +141,19 @@ def ensure_token(site: dict, account: dict, cfg: dict,
     """
     from ..service.secret_store import open_ as _open
     token = _open(account.get("token"))
+    cookie = _open(account.get("siteCookie"))
     if not token_expiring(token):
         account["token"] = token            # 就地换成明文,调用方直接可用
-        account["siteCookie"] = _open(account.get("siteCookie"))
+        account["siteCookie"] = cookie
         return token
-    cookie = _open(account.get("siteCookie"))
+    # 走到这里:token 为空或将过期。login 型站点(如 AgentRouter)只有浏览器
+    # session cookie、没有 JWT;这类站点**不能每次请求前都重放 OAuth**
+    # (实测 12s/次,一键刷新被单站拖垮)。有 cookie 就先用,失效由
+    # call_with_auto_reauth 的 401 兜底换新;真正过期时才会走下面的 exchange。
+    if not token and cookie:
+        account["token"] = token
+        account["siteCookie"] = cookie
+        return token
     if token or cookie:                       # 有任一凭据才尝试静默换新
         r = exchange(site, account, cfg, credential)
         if r.state == "ok" and r.token:

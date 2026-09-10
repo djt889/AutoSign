@@ -119,6 +119,31 @@ def save(cfg: dict[str, Any]) -> None:
         )
 
 
+def update(mutator) -> dict[str, Any]:
+    """原子读-改-写事务:整个 load→mutator→save 在锁内完成。
+
+    并发签到/刷新/授权会各自 load→改→save,非原子时后写覆盖先写,
+    实测并发新增 90 条只落盘 34 条(账号被吞 → 前端拿旧 key 报"账号不存在")。
+    mutator(cfg) 就地修改 cfg;返回修改后的 cfg。
+    """
+    with _lock:
+        if CFG_PATH.exists():
+            try:
+                raw = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+                cfg = _deep_merge(DEFAULTS, raw)
+            except (json.JSONDecodeError, OSError):
+                cfg = deepcopy(DEFAULTS)
+        else:
+            cfg = deepcopy(DEFAULTS)
+        if not isinstance(cfg.get("sites"), list):
+            cfg["sites"] = []
+        result = mutator(cfg)
+        CFG_PATH.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return result if isinstance(result, dict) else cfg
+
+
 def site_key_of(base_url: str) -> str:
     """与原版 siteKeyOf 同规则:域名小写、非法字符转 -。"""
     import re
