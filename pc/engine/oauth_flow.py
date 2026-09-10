@@ -200,8 +200,14 @@ def extract_credentials(body: dict) -> dict:
     }
 
 
-def b1_identity_check(creds: dict, account: dict) -> tuple[bool, str]:
-    """B1 身份校验(锚点分层):强判据 github_id;弱判据 username;都无跳过。"""
+def b1_identity_check(creds: dict, account: dict, trusted: bool = False) -> tuple[bool, str]:
+    """B1 身份校验(锚点分层):强判据 github_id;弱判据 username;都无跳过。
+
+    trusted=True 表示本次是「用本账号凭据现场登录」取得的会话——此时身份可信,
+    站点返回的用户名是站点自动生成的命名空间(如 AgentRouter 的 github_494101),
+    与用户填的 GitHub 登录名(DeanCastiel)本就不同,不应据此拒绝,否则正常账号
+    会被误拦。仅当非可信(残余会话/浏览器 cookie 路径)时才强制比对,防串流。
+    """
     cached_gid = str(account.get("githubId") or "").strip()
     cached_login = str(account.get("githubAccount") or "").strip()
     resp_gid = creds.get("github_id", "")
@@ -214,6 +220,9 @@ def b1_identity_check(creds: dict, account: dict) -> tuple[bool, str]:
         return True, ""       # 响应有锚点但无缓存,放行并落库
     if not resp_gid and cached_login and resp_login:
         if resp_login.lower() != cached_login.lower():
+            # 用凭据现场登录成功 ⇒ 身份可信;站点用户名多为自动生成命名空间
+            if trusted:
+                return True, ""
             return False, f"username 不匹配(响应 {resp_login} ≠ 缓存 {cached_login})"
         return True, ""
     return True, ""           # 都拿不到 ⇒ 跳过,不误拒
@@ -244,6 +253,9 @@ def authorize(site: dict, account: dict, cfg: dict,
         return AuthResult("failed", f"获取授权会话失败: {err}")
     client_id = fetch_client_id(anon_client)
     want_login = str(account.get("githubAccount") or "").strip()
+    # 有账密 ⇒ 本次是"用本账号凭据现场登录",身份可信(站点返回的用户名是
+    # 站点自动生成的命名空间,与 GitHub 登录名不同,不应据此拒绝)
+    cred_trusted = bool(credential and credential.get("password"))
     auth_url = ("https://github.com/login/oauth/authorize"
                 f"?client_id={quote(client_id)}&state={quote(flow_token)}"
                 f"&scope=user:email"
@@ -279,6 +291,29 @@ def authorize(site: dict, account: dict, cfg: dict,
                 pass
         page.on("request", on_request)
 
+        # 跨账号残留会话预清:profile 里若登录着**别的** GitHub 账号,GitHub 会
+        # 无视 login= 参数直接用旧会话授权(实测:目标 DeanCastiel 却落到
+        # github_494101)。判据用凭据里的 GitHub 登录名(credential.username,
+        # 与 dotcom_user 同命名空间),不能用 account.githubAccount(那是站点
+        # 自动生成的用户名,如 github_473221,命名空间不同会误清)。
+        if credential and credential.get("username"):
+            try:
+                gck = page.context.cookies("https://github.com")
+                dotcom = next((c.get("value") or "" for c in gck
+                               if c.get("name") == "dotcom_user"), "")
+            except Exception:
+                dotcom = ""
+            if dotcom and dotcom.lower() != str(credential["username"]).lower():
+                db.append_log(sk, ak, "oauth", {"step": "session-switch",
+                                                "from": dotcom,
+                                                "to": credential["username"]})
+                try:
+                    page.context.clear_cookies()
+                    page.goto(auth_url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
         # 等待最终落点:回调页(站点域)。
         # GitHub 登录墙出现时:有凭据 ⇒ 立即自动填充(登录/2FA)后继续等;
         # 无凭据或填充后仍过不去 ⇒ headless 判 need_manual,有头(方式 B)由用户现场操作。
@@ -305,13 +340,26 @@ def authorize(site: dict, account: dict, cfg: dict,
                 # 同时导出浏览器站点 cookie(httpOnly session 完整版——
                 # 服务端 FetcherSession 抓 Set-Cookie 会漏,实测 AgentRouter 只抓到
                 # WAF 的 acw_tc,真凭据 session 只存在于浏览器上下文)
-                try:
-                    all_cookies = page.context.cookies()
-                    ar = [c for c in all_cookies if site_host in (c.get("domain") or "")]
-                    holder["site_cookies"] = "; ".join(
-                        f"{c['name']}={c['value']}" for c in ar)
-                except Exception:
-                    pass
+                # 站点 SPA 落地后仍要 fire 一次 /api/oauth/... 前端交换才拿到
+                # session cookie;若立刻返回会只抓到 WAF 的 acw_tc(假成功 401)。
+                # 因此落地后轮询等"非 WAF 的 session cookie"出现,最多 ~12s。
+                def _export():
+                    try:
+                        all_cookies = page.context.cookies()
+                        ar = [c for c in all_cookies if site_host in (c.get("domain") or "")]
+                        holder["site_cookies"] = "; ".join(
+                            f"{c['name']}={c['value']}" for c in ar)
+                        return ar
+                    except Exception:
+                        return []
+
+                ar = _export()
+                for _ in range(12):
+                    if any((c.get("name") or "").lower() not in
+                           ("acw_tc", "acw_sc__v2", "cdn_sec_tc") for c in ar):
+                        break                      # 真 session 已出现
+                    page.wait_for_timeout(1000)
+                    ar = _export()
                 holder["github_ok"] = True
                 return
             on_wall = bool(NEED_MANUAL_URL_RE.search(url))
@@ -389,7 +437,8 @@ def authorize(site: dict, account: dict, cfg: dict,
                     if creds.get("token") or creds.get("github_login"):
                         return _finish_auth(sk, ak, site, account, creds, cfg,
                                             xhr_headers=xhr.headers,
-                                            browser_cookies=holder["site_cookies"])
+                                            browser_cookies=holder["site_cookies"],
+                                            trusted=cred_trusted)
         except Exception:
             continue
 
@@ -405,6 +454,7 @@ def authorize(site: dict, account: dict, cfg: dict,
     if landed and holder["site_cookies"]:
         creds = {"token": "", "github_login": want_login,
                  "github_id": "", "site_user_id": ""}
+        probe_ok = False
         try:
             probe = SiteClient(site, {**account, "siteCookie": holder["site_cookies"]}, cfg)
             sr = probe.call("get", "/api/user/self")
@@ -415,12 +465,20 @@ def authorize(site: dict, account: dict, cfg: dict,
                     "github_id": str(d.get("github_user_id") or d.get("github_id") or ""),
                     "site_user_id": str(d.get("id") or ""),
                 })
+                probe_ok = True
         except Exception:
             pass
-        db.append_log(sk, ak, "oauth", {"step": "done-via-browser-cookie",
-                                        "hasCookie": True})
-        return _finish_auth(sk, ak, site, account, creds, cfg,
-                            browser_cookies=holder["site_cookies"])
+        # 关键:必须探测通过才认成功。浏览器上下文里常只有 WAF 的 acw_tc
+        # (非 session),若无脑按"有 cookie"落库会假成功(401 账号显示已授权)。
+        # 探测失败 ⇒ 不落库,继续走回调 code 交换路径。
+        if probe_ok:
+            db.append_log(sk, ak, "oauth", {"step": "done-via-browser-cookie",
+                                            "hasCookie": True})
+            return _finish_auth(sk, ak, site, account, creds, cfg,
+                                browser_cookies=holder["site_cookies"],
+                                trusted=cred_trusted)
+        db.append_log(sk, ak, "oauth", {"step": "browser-cookie-probe-fail",
+                                        "cookies": holder["site_cookies"][:80]}, "err")
 
     cb = CallbackCheck()
     for u in holder["chain"] or [final_url]:
@@ -468,20 +526,22 @@ def authorize(site: dict, account: dict, cfg: dict,
 
     return _finish_auth(sk, ak, site, account, extract_credentials(ex.data), cfg,
                         set_cookies=ex.set_cookies,
-                        browser_cookies=holder["site_cookies"])
+                        browser_cookies=holder["site_cookies"],
+                        trusted=cred_trusted)
 
 
 def _finish_auth(sk: str, ak: str, site: dict, account: dict, creds: dict,
                  cfg: dict, set_cookies: list[str] | None = None,
                  xhr_headers: Any = None,
-                 browser_cookies: str = "") -> AuthResult:
+                 browser_cookies: str = "", trusted: bool = False) -> AuthResult:
     """凭据落库收尾(主交换/capture_xhr 保险路径共用):B1 校验 + 凭据合成。
 
     site_cookie 取三者并集:浏览器上下文导出(最全,含 httpOnly session)
     > 服务端 Set-Cookie 解析 > capture_xhr 响应头。实测依据:AgentRouter 的
     真凭据 session 是 httpOnly,服务端 FetcherSession 只抓到 WAF acw_tc。
+    trusted:本次是否用本账号凭据现场登录(是则站点自动生成的用户名可放行)。
     """
-    ok, why = b1_identity_check(creds, account)
+    ok, why = b1_identity_check(creds, account, trusted=trusted)
     if not ok:
         db.append_log(sk, ak, "oauth", {"step": "b1", "error": why}, "err")
         return AuthResult("failed", f"身份校验失败:{why}")

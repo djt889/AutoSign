@@ -248,6 +248,17 @@ def test_b1_identity_check():
     assert of.b1_identity_check({}, {"githubAccount": "alice"})[0]
 
 
+def test_b1_trusted_allows_site_generated_username():
+    """回归:用本账号凭据现场登录时,站点自动生成的用户名(如 AgentRouter 的
+    github_494101)与用户填的 GitHub 登录名(DeanCastiel)不同,不应误拒。"""
+    creds = {"github_login": "github_494101"}
+    account = {"githubAccount": "DeanCastiel"}
+    # 非可信(浏览器 cookie 路径)⇒ 仍拒,防串流
+    assert not of.b1_identity_check(creds, account)[0]
+    # 可信(账密现场登录)⇒ 放行
+    assert of.b1_identity_check(creds, account, trusted=True)[0]
+
+
 # ---------- 凭据库 ----------
 
 def test_credentials_roundtrip(monkeypatch, tmp_path):
