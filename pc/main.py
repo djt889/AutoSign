@@ -1,9 +1,9 @@
-"""main.py — FastAPI 入口(P0 最小版)。
+"""main.py — FastAPI 入口(WebUI 服务端 + 全部 API 端点)。
 
-P0 范围:/api/health + 静态 WebUI 托管 + 站点/账号只读 API。
-P1+ 再挂:checkin / oauth / credentials / scheduler / SSE(见设计文档 §4.3)。
+包含:health / 静态 WebUI / 站点与账号 CRUD / 额度状态(10 分钟缓存) /
+签到 / 凭据库与凭据验证 / OAuth 授权(无头+有头兜底) / 定时调度 / SSE 实时日志。
 
-启动:python -m pc.main   (默认 0.0.0.0:7300)
+启动:python -m pc.main   (默认 0.0.0.0:37421,可用 JUSTSIGN_PORT 覆盖)
 """
 from __future__ import annotations
 
