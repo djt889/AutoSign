@@ -40,14 +40,21 @@ FALLBACK_CLIENT_ID = "Ov23liBGecTYSePKpXQC"   # 原版兜底值(JustDoWork 实�
 
 @dataclass
 class AuthResult:
-    state: str                          # ok / need_manual / failed
+    state: str                          # ok / need_code / need_manual / failed
     message: str = ""
     token: str = ""
     site_cookie: str = ""
     site_user_id: str = ""
     github_login: str = ""
     github_id: str = ""
-    manual_url: str = ""                # need_manual 时给用户的手动授权 URL
+    manual_url: str = ""                # need_manual/等码超时给用户的手动授权 URL
+    hint: str = ""                      # 需人工介入时的提示(区分 TOTP/邮箱设备验证码)
+    code_task: str = ""                 # 本授权对应的 task_id(手动码注入桶)
+
+
+def _cookie_names(cookie_header: str) -> list[str]:
+    """只取 cookie 名(不取值),供日志记录——避免凭据明文落日志/回显到 UI。"""
+    return [p.split("=", 1)[0].strip() for p in (cookie_header or "").split(";") if "=" in p]
 
 
 def profile_dir(site_key: str, account_key: str) -> str:
@@ -231,10 +238,16 @@ def b1_identity_check(creds: dict, account: dict, trusted: bool = False) -> tupl
 # ---------- 主流程(方式 A:headless 全自动) ----------
 
 def authorize(site: dict, account: dict, cfg: dict,
-              credential: dict | None = None, headful: bool = False) -> AuthResult:
+              credential: dict | None = None, headful: bool = False,
+              task_id: str = "", on_state=None) -> AuthResult:
     """OAuth 全流程。headful=False(默认,方式 A)headless 全自动;
     headful=True(方式 B 兜底)弹可见浏览器,用户现场登录一次,
     GitHub 会话存 user_data_dir,之后恢复全自动。
+
+    task_id:  本次授权的任务标识,用于手动码(task_id)隔离与结果回带。
+    on_state: 需要用户介入时调用(可多次,同一状态只报一次);流程继续等待注入码,
+              不返回;超时后才返回。dict 形如 {"state":"waiting_code","hint":...}
+              或 {"state":"waiting_manual","manualUrl":...}。
     """
     from scrapling.fetchers import StealthyFetcher
 
@@ -265,10 +278,32 @@ def authorize(site: dict, account: dict, cfg: dict,
 
     # 2. headless 浏览器走授权(user_data_dir 持久化 GitHub 会话)
     holder: dict[str, Any] = {"final_url": "", "github_ok": False, "chain": [],
-                              "site_cookies": ""}
+                              "site_cookies": "",
+                              "waiting": set()}   # 已通知过的状态(waiting_code/...)
     prj = profile_dir(sk, ak)
 
     def action(page):
+        # on_state 同一状态只报一次(契约 §2):用 holder["waiting"] 跨循环去重
+        def _notify(st: dict) -> None:
+            key = st.get("state", "")
+            if key in holder["waiting"]:
+                return
+            holder["waiting"].add(key)
+            try:
+                if on_state is not None:
+                    on_state(st)
+            except Exception:
+                pass
+
+        def _waiting_code_hint(url: str) -> str:
+            if "verified-device" in url or "/device" in url:
+                return ("GitHub 正在向你的登录邮箱发送设备验证码:请查收邮箱(或手机上的"
+                        "GitHub App),把 6 位数字码填入下方输入框;该码在浏览器里自动提交。"
+                        "若邮箱收不到,可改用右上角手动授权。")
+            return ("需要 GitHub 两步验证(2FA):请在下方输入框填入当前有效的 6 位验证码"
+                    "(已配置 TOTP 自动码时无需手动填)。若未配置 TOTP 密钥,请输入手机"
+                    "认证器上的 6 位动态码。")
+
         # 导航链记录(等价原版 WebView onPageStarted:每一次跳转的 URL 都留痕,
         # 包括 OAuth 中间跳转——SPA 前端会消费 code 后跳 dashboard,终态轮询会漏)
         def on_nav(frame):
@@ -368,19 +403,33 @@ def authorize(site: dict, account: dict, cfg: dict,
                 # 若登录分支在前,2FA 页会被吞掉导致永远填不进码);
                 # 登录页填账密(一次);2FA/设备验证页轮询填码(密钥码/手动码/邮箱码)
                 if "two-factor" in url or "verified-device" in url or "/device" in url:
-                    _fill_totp(page, credential)
+                    if not filled["otp"]:
+                        # ⑦ 同一页/同一码只提交一次:填过就置位跳过(防每 2s 重复 fill)
+                        code = _take_manual_code(task_id)   # 取一次即消费,不重复取
+                        auto = "" if ("verified-device" in url or "/device" in url) \
+                            else _totp_code(credential)
+                        if not code and not auto:
+                            # ⑥ 无自动码(TOTP 密钥)也无已注入码 ⇒ 通知前端等待用户填码,
+                            #    继续循环等注入(不静默空转)
+                            _notify({"state": "waiting_code",
+                                     "hint": _waiting_code_hint(url)})
+                        elif _fill_totp(page, credential, code=code):
+                            filled["otp"] = True
                 elif "login" in url or "/session" in url:
                     if not filled["login"] and _fill_login(page, credential):
                         filled["login"] = True
                 page.wait_for_timeout(2000)
                 continue
             if on_wall and headful and ("two-factor" in url or "verified-device" in url
-                                        or "/device" in url) and globals()["_manual_code"]:
-                # 有头模式:用户手机/邮箱上的码通过 API 发来,直接注入(30s 窗口)
-                _fill_totp(page, credential or {})
-                globals()["_manual_code"] = ""
-                page.wait_for_timeout(2000)
-                continue
+                                        or "/device" in url):
+                # 有头模式:用户手机/邮箱上的码通过 API 发来(task_id 隔离),直接注入
+                # ⑧ 按本任务 task_id 取码(不再用全局 _manual_code)
+                code = _take_manual_code(task_id)
+                if not filled["otp"] and code:
+                    if _fill_totp(page, credential or {}, code=code):
+                        filled["otp"] = True
+                    page.wait_for_timeout(2000)
+                    continue
             if on_wall and not headful:
                 # 无凭据(或未提供)⇒ 转人工
                 holder["github_ok"] = False
@@ -438,7 +487,8 @@ def authorize(site: dict, account: dict, cfg: dict,
                         return _finish_auth(sk, ak, site, account, creds, cfg,
                                             xhr_headers=xhr.headers,
                                             browser_cookies=holder["site_cookies"],
-                                            trusted=cred_trusted)
+                                            trusted=cred_trusted,
+                                            task_id=task_id)
         except Exception:
             continue
 
@@ -476,9 +526,9 @@ def authorize(site: dict, account: dict, cfg: dict,
                                             "hasCookie": True})
             return _finish_auth(sk, ak, site, account, creds, cfg,
                                 browser_cookies=holder["site_cookies"],
-                                trusted=cred_trusted)
+                                trusted=cred_trusted, task_id=task_id)
         db.append_log(sk, ak, "oauth", {"step": "browser-cookie-probe-fail",
-                                        "cookies": holder["site_cookies"][:80]}, "err")
+                                        "cookieNames": _cookie_names(holder["site_cookies"])}, "err")
 
     cb = CallbackCheck()
     for u in holder["chain"] or [final_url]:
@@ -512,10 +562,22 @@ def authorize(site: dict, account: dict, cfg: dict,
             db.append_log(sk, ak, "oauth", {"step": "github-wall", "url": final_url[:80]}, "err")
             return AuthResult("need_manual",
                               "GitHub 会话过期且无法自动填充,需手动授权一次(之后恢复全自动)",
-                              manual_url=auth_url)
+                              manual_url=auth_url,
+                              code_task=task_id)
         db.append_log(sk, ak, "oauth", {"step": "callback", "verdict": "timeout",
                                         "url": final_url[:80]}, "err")
-        return AuthResult("failed", f"授权超时(最终落点 {urlparse(final_url).hostname})", manual_url=auth_url)
+        # ⑥ 等码超时仍无码:返回 failed 且 manual_url 非空(前端还能给手动出路);
+        #    带 code_task 让前端知道是哪个任务在等码。若本次确实卡在等码,
+        #    把 waiting_code 的提示带上,用户才知道"失败原因=没填验证码"。
+        waited_code = "waiting_code" in holder.get("waiting", set())
+        hint = ""
+        if waited_code:
+            hint = ("等待验证码超时:本次授权需要 6 位验证码(2FA 或邮箱设备码),"
+                    "超时未收到。可重新授权并在提示出现后填码,或点下方手动授权。")
+        return AuthResult("failed",
+                          ("等待验证码超时" if waited_code
+                           else f"授权超时(最终落点 {urlparse(final_url).hostname})"),
+                          manual_url=auth_url, code_task=task_id, hint=hint)
 
     # 4. 交换(服务端直调,主交换响应直接抓 Set-Cookie;code 一次性,不重放)
     ex = anon_client.call("get", f"/api/oauth/github?code={quote(cb.code)}&state={quote(cb.state)}")
@@ -527,19 +589,21 @@ def authorize(site: dict, account: dict, cfg: dict,
     return _finish_auth(sk, ak, site, account, extract_credentials(ex.data), cfg,
                         set_cookies=ex.set_cookies,
                         browser_cookies=holder["site_cookies"],
-                        trusted=cred_trusted)
+                        trusted=cred_trusted, task_id=task_id)
 
 
 def _finish_auth(sk: str, ak: str, site: dict, account: dict, creds: dict,
                  cfg: dict, set_cookies: list[str] | None = None,
                  xhr_headers: Any = None,
-                 browser_cookies: str = "", trusted: bool = False) -> AuthResult:
+                 browser_cookies: str = "", trusted: bool = False,
+                 task_id: str = "", hint: str = "") -> AuthResult:
     """凭据落库收尾(主交换/capture_xhr 保险路径共用):B1 校验 + 凭据合成。
 
     site_cookie 取三者并集:浏览器上下文导出(最全,含 httpOnly session)
     > 服务端 Set-Cookie 解析 > capture_xhr 响应头。实测依据:AgentRouter 的
     真凭据 session 是 httpOnly,服务端 FetcherSession 只抓到 WAF acw_tc。
     trusted:本次是否用本账号凭据现场登录(是则站点自动生成的用户名可放行)。
+    task_id/hint:回带授权结果(契约 §5),前端据此知道是哪个任务的码。
     """
     ok, why = b1_identity_check(creds, account, trusted=trusted)
     if not ok:
@@ -566,6 +630,7 @@ def _finish_auth(sk: str, ak: str, site: dict, account: dict, creds: dict,
         token=creds["token"], site_cookie=site_cookie,
         site_user_id=creds["site_user_id"],
         github_login=creds["github_login"], github_id=creds["github_id"],
+        code_task=task_id, hint=hint,
     )
 
 
@@ -610,13 +675,14 @@ def _fill_login(page, credential: dict) -> bool:
         return False
 
 
-def _fill_totp(page, credential: dict) -> bool:
+def _fill_totp(page, credential: dict, code: str = "") -> bool:
     """2FA 页:默认非 TOTP 时先切「Use authenticator app」,再填 6 位码。
 
-    TOTP 码满 6 位自动提交;无 TOTP 密钥 ⇒ False(交人工)。
+    code: 调用方已取出的手动码(一次性,取即消费);为空时退回 TOTP 密钥生成。
+    TOTP 码满 6 位自动提交;两者都无 ⇒ False(交人工)。
 
     邮箱验证码页(verified-device/device):GitHub 给登录邮箱发 6 位数字码,
-    同样走 6 位输入框提交 —— _manual_code(前端填码框注入,见 /api/oauth/totp)
+    同样走 6 位输入框提交 —— 手动码(前端填码框注入,见 /api/oauth/totp)
     在此分支同样生效,无需 TOTP 密钥。
     """
     url = ""
@@ -625,7 +691,7 @@ def _fill_totp(page, credential: dict) -> bool:
     except Exception:
         pass
     is_email_code = ("verified-device" in url) or ("/device" in url and "two-factor" not in url)
-    code = globals().get("_manual_code", "") or ("" if is_email_code else _totp_code(credential))
+    code = str(code or "").strip() or ("" if is_email_code else _totp_code(credential))
     if not code:
         return False
     try:
@@ -644,13 +710,51 @@ def _fill_totp(page, credential: dict) -> bool:
         return False
 
 
-# 用户实时提供的 6 位码(有头模式:手机 App 上看到的码发来即填,30s 有效)
-_manual_code: str = ""
+# ---------- 手动码存储(契约 5/3):按 task_id 隔离 + 120s 过期 + 一次性消费 ----------
+
+_MANUAL_CODE_TTL = 120.0                # 注入后有效期(秒)
+_manual_codes: dict[str, tuple[str, float]] = {}
+_DEFAULT_BUCKET = "_default"            # 未传 task_id 的旧调用落入的桶
 
 
-def set_manual_code(code: str) -> None:
-    global _manual_code
-    _manual_code = str(code).strip()[:6]
+def set_manual_code(code: str, task_id: str = "") -> None:
+    """注入 6 位码(契约 5):码按 task_id 隔离存储,注入后 120s 过期。
+
+    task_id 为空(旧调用)⇒ 落入 _default 桶;消费一次即清除(防串码/防残留)。
+    """
+    code = str(code or "").strip()[:6]
+    bucket = task_id or _DEFAULT_BUCKET
+    _manual_codes[bucket] = (code, time.time() + _MANUAL_CODE_TTL)
+
+
+def _take_manual_code(task_id: str = "") -> str:
+    """按 task_id 取手动码:取即消费(清除),过期/无码返回空。"""
+    bucket = task_id or _DEFAULT_BUCKET
+    item = _manual_codes.get(bucket)
+    if not item:
+        return ""
+    code, exp = item
+    if time.time() > exp:
+        _manual_codes.pop(bucket, None)    # 过期即清
+        return ""
+    _manual_codes.pop(bucket, None)        # 一次性消费
+    return code
+
+
+def _peek_manual_code(task_id: str = "") -> str:
+    """不消费地查码(仅测试/调试用):过期视为无。"""
+    item = _manual_codes.get(task_id or _DEFAULT_BUCKET)
+    if not item:
+        return ""
+    code, exp = item
+    if time.time() > exp:
+        return ""
+    return code
+
+
+def _clear_manual_codes() -> None:
+    """清空全部手动码(测试隔离用)。"""
+    _manual_codes.clear()
 
 
 def _totp_code(credential: dict) -> str:

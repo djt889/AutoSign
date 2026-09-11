@@ -18,9 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .engine.checkin import run_checkin
-from .engine.credentials import (delete_credential, get_credential,
-                              list_credentials, migrate_legacy_enc,
-                              save_credential, upsert_credential)
+from .engine.credentials import (delete_credential, derive_auth_mode,
+                              get_credential, list_credentials,
+                              migrate_legacy_enc, save_credential,
+                              upsert_credential)
 from .engine.oauth_flow import AuthResult, authorize, set_manual_code
 from .engine.site_client import QUOTA_PER_UNIT_DEFAULT, SiteClient
 from .engine.silent_auth import clear_cooldown, exchange
@@ -41,7 +42,8 @@ def _mask(token: str | None) -> str | None:
 def _mask_site(s: dict) -> dict:
     out = dict(s)
     out["accounts"] = [
-        {**a, "token": _mask(a.get("token"))} for a in (s.get("accounts") or [])
+        {**a, "token": _mask(a.get("token")), "siteCookie": _mask(a.get("siteCookie"))}
+        for a in (s.get("accounts") or [])
     ]
     return out
 
@@ -236,9 +238,15 @@ async def events():
 
 @app.get("/api/config")
 def get_config():
-    """原版 WebUI 兼容:返回带 cfg 包装的配置(token 打码)。"""
+    """原版 WebUI 兼容:返回带 cfg 包装的配置(token/cookie 打码)。
+
+    凭据库(credentials[])从响应中剔除——它含加密的 password/twofa 密文与
+    账号元数据,前端只应通过 /api/credentials(明文/密文均不回显)访问。
+    """
     cfg = config.load()
-    return {"ok": True, "cfg": {**cfg, "sites": [_mask_site(s) for s in cfg.get("sites", [])]}}
+    safe = {k: v for k, v in cfg.items() if k != "credentials"}
+    safe["sites"] = [_mask_site(s) for s in cfg.get("sites", [])]
+    return {"ok": True, "cfg": safe}
 
 
 @app.get("/api/logs/{account_key}")
@@ -254,14 +262,21 @@ def account_logs(account_key: str, category: str = "系统", limit: int = 50, pa
                               f"/api/log/self?category={category}&page={page}&limit={limit}")
     data = (r.data or {}).get("data") or {}
     items = data.get("list") or data.get("items") or (data if isinstance(data, list) else [])
-    rows = [{
-        "time": str(x.get("created_at") or x.get("time") or "")[:19],
-        "category": x.get("category") or category,
-        "text": (x.get("description") or x.get("content") or x.get("remark")
-                 if isinstance(x, dict) else str(x)),
-        "quota": x.get("quota") if isinstance(x, dict) else None,
-    } for x in (items or [])]
-    last_bonus = next((row for row in rows if "签到" in str(row["text"])), None)
+
+    def _row(x):
+        if not isinstance(x, dict):
+            return {"time": "", "category": category, "text": str(x), "quota": None}
+        return {
+            "time": str(x.get("created_at") or x.get("time") or "")[:19],
+            "category": x.get("category") or category,
+            "text": x.get("description") or x.get("content") or x.get("remark"),
+            "quota": x.get("quota"),
+        }
+
+    rows = [_row(x) for x in (items or [])]
+    # 只认「签到」类文案(排除注册赠送/邀请赠送——同为系统日志但非每日签到)
+    last_bonus = next((row for row in rows if "签到" in str(row["text"])
+                       and not any(w in str(row["text"]) for w in ("注册", "邀请", "兑换"))), None)
     db.append_log(site["key"], account_key, "logs", {"http": r.status, "rows": len(rows)})
     return {"ok": r.status == 200, "http": r.status, "rows": rows, "lastBonus": last_bonus}
 
@@ -337,27 +352,35 @@ def sites_delete(site_key: str):
 @app.post("/api/accounts/save")
 def accounts_save(body: dict):
     """新增/更新账号。原子事务:并发(签到/刷新/授权)时不互相覆盖丢账号
-    ——这是"前端拿旧 key 报账号不存在"的根因。"""
+    ——这是"前端拿旧 key 报账号不存在"的根因。
+    同站点同凭据去重(契约 9):已存在则复用其 key,不重复建账号。"""
     from .service.secret_store import seal
-    out = {"key": ""}
+    out = {"key": "", "deduplicated": False}
 
     def _mut(cfg):
         site = next((s for s in cfg["sites"] if s["key"] == body.get("siteKey")), None)
         if not site:
             raise HTTPException(400, "siteKey 无效")
         site.setdefault("accounts", [])
+        cid = str(body.get("credentialId", "") or "")
         key = body.get("key") or f"acc_{int(time.time() * 1000)}"
         acc = next((a for a in site["accounts"] if a["key"] == key), None)
+        if acc is None and cid:
+            # 契约 9:同站点同凭据已存在 ⇒ 复用其 key(在事务内判,防并发重复建)
+            dup = next((a for a in site["accounts"]
+                        if (a.get("credentialId") or "") == cid), None)
+            if dup:
+                acc, key, out["deduplicated"] = dup, dup["key"], True
         if not acc:
             acc = {"key": key, "alias": body.get("alias") or key}
             site["accounts"].append(acc)
         if body.get("alias"):
             acc["alias"] = str(body["alias"]).strip()
         # 凭据库引用(原版模型):绑定的凭据决定 githubAccount / 自动填充
-        if body.get("credentialId"):
-            acc["credentialId"] = body["credentialId"]
+        if cid:
+            acc["credentialId"] = cid
             for _c in (cfg.get("credentials") or []):
-                if _c.get("id") == body["credentialId"]:
+                if _c.get("id") == cid:
                     gh = _c.get("githubUser") or _c.get("siteAccount") or ""
                     if gh:
                         acc["githubAccount"] = gh
@@ -365,6 +388,13 @@ def accounts_save(body: dict):
         for f in ("githubAccount", "siteUserId"):
             if body.get(f) is not None:
                 acc[f] = body[f]
+        # 授权方式(契约 6):显式传值优先;否则由凭据能力推导(有密码→auto,
+        # 无密码→manual),已存在则不覆盖
+        am = str(body.get("authMode", "") or "")
+        if am in ("auto", "manual"):
+            acc["authMode"] = am
+        elif not acc.get("authMode"):
+            acc["authMode"] = derive_auth_mode(cid) if cid else "manual"
         for f in ("token", "siteCookie"):
             if body.get(f) is not None:
                 acc[f] = seal(body[f])
@@ -372,8 +402,10 @@ def accounts_save(body: dict):
         out["key"] = key
 
     config.update(_mut)
-    db.append_log(body.get("siteKey", "*"), out["key"], "account-save", {"hasToken": bool(body.get("token"))})
-    return {"ok": True, "key": out["key"]}
+    db.append_log(body.get("siteKey", "*"), out["key"], "account-save",
+                  {"hasToken": bool(body.get("token")),
+                   "deduplicated": out["deduplicated"]})
+    return {"ok": True, "key": out["key"], "deduplicated": out["deduplicated"]}
 
 
 @app.delete("/api/accounts/{account_key}")
@@ -430,23 +462,88 @@ def credentials_delete(credential_id: str):
     return {"ok": True}
 
 
-@app.post("/api/credentials/{account_key}")
-def credentials_save(account_key: str, body: dict):
-    """旧路径兼容:为账号写/绑定凭据(自动建全局凭据并引用)。"""
-    if not save_credential(
-        account_key,
-        username=str(body.get("username", "") or ""),
-        password=str(body.get("password", "") or ""),
-        totp_secret=str(body.get("totpSecret", "") or ""),
-    ):
-        raise HTTPException(404, "账号不存在或凭据为空")
-    return {"ok": True, "hint": "已加密存储(读不回显)"}
-
-
 # ---------- OAuth 授权(方式 A headless;长任务异步句柄) ----------
 
 _oauth_tasks: dict[str, dict] = {}
+_verify_tasks: dict[str, dict] = {}
 _task_lock = threading.Lock()
+_task_ts: dict[str, float] = {}      # task_id → 写入时间(清理用,不出现在响应里)
+_TASK_TTL_S = 3600                   # 任务状态保留 1 小时(契约 12)
+_TASK_MAX = 200                      # 最多保留 200 条(契约 12)
+
+# AuthResult.state → 前端任务 state(契约 4:need_code/need_manual 分流)
+_AUTH_STATE_TO_TASK = {
+    "need_code": "waiting_code",
+    "need_manual": "waiting_manual",
+    "ok": "ok",
+    "failed": "failed",
+}
+
+
+def _cleanup_tasks_locked() -> None:
+    """清理任务状态(须持 _task_lock):先删超 1h 的,再按最旧淘汰到容量上限。"""
+    now = time.time()
+    for k in [k for k, ts in _task_ts.items() if now - ts > _TASK_TTL_S]:
+        _task_ts.pop(k, None)
+        _oauth_tasks.pop(k, None)
+        _verify_tasks.pop(k, None)
+    if len(_task_ts) > _TASK_MAX:
+        oldest = sorted(_task_ts, key=lambda k: _task_ts[k])[: len(_task_ts) - _TASK_MAX]
+        for k in oldest:
+            _task_ts.pop(k, None)
+            _oauth_tasks.pop(k, None)
+            _verify_tasks.pop(k, None)
+
+
+def _put_task(store: dict, task_id: str, payload: dict) -> None:
+    """线程安全写任务状态 + 顺带清理(契约 12);写入后容量严格 ≤ _TASK_MAX。"""
+    with _task_lock:
+        store[task_id] = payload
+        _task_ts[task_id] = time.time()
+        _cleanup_tasks_locked()
+
+
+def _state_task(st: dict) -> dict:
+    """on_state 通知 → 任务负载(契约 2/4):waiting_code/waiting_manual 就地展示。"""
+    return {
+        "state": st.get("state") or "running",
+        "message": st.get("message") or "",
+        "hint": st.get("hint") or "",
+        "codeTask": st.get("codeTask") or st.get("code_task") or "",
+        "manualUrl": st.get("manualUrl") or st.get("manual_url") or "",
+        "login": st.get("login") or "",
+    }
+
+
+def _result_task(r: AuthResult, message: str | None = None) -> dict:
+    """AuthResult → 任务负载(契约 4 映射:need_code→waiting_code 等)。"""
+    return {
+        "state": _AUTH_STATE_TO_TASK.get(getattr(r, "state", ""), "failed"),
+        "message": (r.message if message is None else message) or "",
+        "hint": getattr(r, "hint", "") or "",
+        "codeTask": getattr(r, "code_task", "") or "",
+        "manualUrl": getattr(r, "manual_url", "") or "",
+        "login": getattr(r, "github_login", "") or "",
+    }
+
+
+def _has_param(fn, name: str) -> bool:
+    """authorize/set_manual_code 是否已支持新契约参数(兼容 ALPHA 尚未合入)。"""
+    try:
+        import inspect
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _run_authorize(site, account, cfg, credential, headful: bool, task_id: str, on_state):
+    """调用 authorize 并按契约 2/3 传入 task_id/on_state(旧签名自动降级)。"""
+    kw: dict = {}
+    if _has_param(authorize, "task_id"):
+        kw["task_id"] = task_id
+    if _has_param(authorize, "on_state"):
+        kw["on_state"] = on_state
+    return authorize(site, account, cfg, credential, headful=headful, **kw)
 
 
 @app.post("/api/oauth/start")
@@ -462,24 +559,24 @@ def oauth_start(body: dict):
     task_id = f"oauth_{int(time.time() * 1000)}"
 
     def worker():
-        with _task_lock:
-            _oauth_tasks[task_id] = {"state": "running", "message": "headless 授权中…"}
+        _put_task(_oauth_tasks, task_id,
+                  {"state": "running", "message": "headless 授权中…",
+                   "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
         try:
             cred = get_credential(account_key)
-            r: AuthResult = authorize(site, acc, cfg, cred or None)
-            with _task_lock:
-                _oauth_tasks[task_id] = {
-                    "state": r.state, "message": r.message,
-                    "manualUrl": r.manual_url,
-                    "login": r.github_login,
-                }
+            r: AuthResult = _run_authorize(
+                site, acc, cfg, cred or None, False, task_id,
+                lambda st: _put_task(_oauth_tasks, task_id, _state_task(st)))
+            # 结束态只在 authorize 返回时写(waiting_* 已由 on_state 就地写入)
+            _put_task(_oauth_tasks, task_id, _result_task(r))
             if r.state == "ok":
                 # 落盘复用 silent_auth._persist(任一变化即成功)
                 from .engine.silent_auth import _persist
                 _persist(site, acc, r)
         except Exception as e:
-            with _task_lock:
-                _oauth_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+            _put_task(_oauth_tasks, task_id,
+                      {"state": "failed", "message": str(e)[:200],
+                       "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
 
     threading.Thread(target=worker, daemon=True, name=f"oauth-{account_key}").start()
     return {"ok": True, "task": task_id}
@@ -501,24 +598,23 @@ def oauth_manual(body: dict):
     task_id = f"oauth-h_{int(time.time() * 1000)}"
 
     def worker():
-        with _task_lock:
-            _oauth_tasks[task_id] = {"state": "running",
-                                     "message": "有头授权中:请在弹出的浏览器里完成登录/验证"}
+        _put_task(_oauth_tasks, task_id,
+                  {"state": "running",
+                   "message": "有头授权中:请在弹出的浏览器里完成登录/验证",
+                   "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
         try:
             cred = get_credential(account_key)
-            r: AuthResult = authorize(site, acc, cfg, cred or None, headful=True)
-            with _task_lock:
-                _oauth_tasks[task_id] = {
-                    "state": r.state, "message": r.message,
-                    "manualUrl": r.manual_url,
-                    "login": r.github_login,
-                }
+            r: AuthResult = _run_authorize(
+                site, acc, cfg, cred or None, True, task_id,
+                lambda st: _put_task(_oauth_tasks, task_id, _state_task(st)))
+            _put_task(_oauth_tasks, task_id, _result_task(r))
             if r.state == "ok":
                 from .engine.silent_auth import _persist
                 _persist(site, acc, r)
         except Exception as e:
-            with _task_lock:
-                _oauth_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+            _put_task(_oauth_tasks, task_id,
+                      {"state": "failed", "message": str(e)[:200],
+                       "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
 
     threading.Thread(target=worker, daemon=True, name=f"oauth-h-{account_key}").start()
     return {"ok": True, "task": task_id,
@@ -527,22 +623,42 @@ def oauth_manual(body: dict):
 
 @app.get("/api/oauth/status")
 def oauth_status(task: str):
+    """任务状态(契约 4):state ∈ running|waiting_code|waiting_manual|ok|failed,
+    带 message/hint/codeTask/manualUrl/login。oauth 与 verify 任务共用。"""
     with _task_lock:
-        t = _oauth_tasks.get(task)
-    if not t:
-        t = _verify_tasks.get(task)
+        t = _oauth_tasks.get(task) or _verify_tasks.get(task)
     if not t:
         raise HTTPException(404, "任务不存在")
     return {"ok": True, **t}
 
 
-_verify_tasks: dict[str, dict] = {}
+# 验证探测站回退常量(仅当凭据无绑定站点、cfg 无站点时才用,契约 11)
+VERIFY_FALLBACK_SITE = {"key": "__verify__", "name": "凭据验证",
+                        "baseUrl": "https://api.justwoker.icu", "checkinType": "newapi"}
+
+
+def _probe_site_for_credential(cfg: dict, credential_id: str = "") -> dict:
+    """选凭据验证的探测站(契约 11):优先该凭据已绑定的任一站点(在
+    cfg.sites[].accounts[] 里找 credentialId 匹配),否则 cfg.sites[0],都没有
+    才回退 JustDoWork 常量。返回站点副本,用其自身 baseUrl/checkinType。
+    """
+    sites = cfg.get("sites") or []
+    if credential_id:
+        for s in sites:
+            if any((a.get("credentialId") or "") == credential_id
+                   for a in (s.get("accounts") or [])):
+                return {**s, "key": s.get("key") or "__verify__"}
+    if sites:
+        s0 = sites[0]
+        return {**s0, "key": s0.get("key") or "__verify__"}
+    return dict(VERIFY_FALLBACK_SITE)
 
 
 @app.post("/api/credentials/verify")
 def credentials_verify(body: dict):
-    """验证凭据:用「验证专用站点+账号」(profile 隔离,不污染真实账号)跑一次
-    headful CDP 真窗口 GitHub 登录,账密自动填充,2FA/邮箱码走授权弹层注入。
+    """验证凭据:用凭据已绑定的站点(没有则 cfg.sites[0],再没有才 JustDoWork)作
+    探测站,profile 隔离不污染真实账号。
+    有密码 ⇒ headless 自验(headful=False,零弹窗);无密码 ⇒ headful=True(契约 7)。
     通过 ⇒ verified=ok(以后复用);失败 ⇒ verified=failed + 原因。
     凭据未保存也可验证:传 username/password/twofa 明文(不落盘,只验一次)。
     body: {id?|username?,password?,twofa?}"""
@@ -555,7 +671,6 @@ def credentials_verify(body: dict):
         if not found_c:
             raise HTTPException(404, "凭据不存在")
         try:
-            from .engine import credentials as cred_mod
             from .service import crypto
             gh = found_c.get("githubUser") or ""
             pw = crypto.decrypt(found_c["password"]) if found_c.get("password") else ""
@@ -568,51 +683,86 @@ def credentials_verify(body: dict):
         pw = str(body.get("password", "") or "")
         tp = str(body.get("twofa", "") or "")
         label = gh or "未保存凭据"
-        if not gh or not pw:
-            raise HTTPException(400, "需要 username + password(未保存模式不落盘)")
+        if not gh:
+            raise HTTPException(400, "需要 username(未保存模式不落盘)")
+        # 无密码的未保存凭据同样允许:走 headful 人工登录验证(契约 7)
 
-    site = {"key": "__verify__", "name": "凭据验证",
-            "baseUrl": "https://api.justwoker.icu", "checkinType": "newapi"}
-    pseudo = {"key": f"__verify_{int(time.time() * 1000)}",
+    # 契约 7:有密码走 headless 自验;无密码才弹浏览器(headful)
+    headful = not pw
+    site = _probe_site_for_credential(cfg, cid if cid else "")
+    # 探测 profile 用**稳定** key(按凭据/用户名),不用时间戳:
+    # 一是复用同一 Chrome profile,二次验证可命中已登录 GitHub 会话(更快);
+    # 二是避免每次验证都在 data/profiles/<site>/ 下新建目录导致无限增长。
+    if cid:
+        probe_key = f"__verify_{cid}"
+    else:
+        probe_key = "__verify_" + "".join(
+            ch if ch.isalnum() else "_" for ch in (gh or "unsaved"))[:40]
+    pseudo = {"key": probe_key,
               "alias": f"验证:{label}", "githubAccount": gh}
     credential = {"username": gh, "password": pw, "totpSecret": tp}
     task_id = f"verify_{int(time.time() * 1000)}"
+    start_msg = ("验证中:请在弹出的 Chrome 里完成登录/2FA/邮箱码" if headful
+                 else "验证中:后台静默自验(账密自动填充,无需操作)")
 
     def worker():
-        with _task_lock:
-            _verify_tasks[task_id] = {"state": "running",
-                                      "message": "验证中:请在弹出的 Chrome 里完成登录/2FA/邮箱码"}
+        _put_task(_verify_tasks, task_id,
+                  {"state": "running", "message": start_msg,
+                   "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
         try:
-            r: AuthResult = authorize(site, pseudo, cfg, credential, headful=True)
-            ok = r.state == "ok"
-            msg = ("验证通过:GitHub 登录成功,以后绑定站点直接复用"
-                   if ok else r.message)
-            with _task_lock:
-                _verify_tasks[task_id] = {
-                    "state": "ok" if ok else "failed", "message": msg,
-                    "manualUrl": r.manual_url, "login": r.github_login,
-                }
-            if cid:
-                mark_verified(cid, ok, "" if ok else r.message)
+            r: AuthResult = _run_authorize(
+                site, pseudo, cfg, credential, headful, task_id,
+                lambda st: _put_task(_verify_tasks, task_id, _state_task(st)))
+            # 结束态只在 authorize 返回时写;waiting_* 已由 on_state 就地写入。
+            # state 映射走契约 4(need_code→waiting_code / need_manual→waiting_manual)
+            payload = _result_task(r)
+            if r.state == "ok":
+                payload["message"] = "验证通过:GitHub 登录成功,以后绑定站点直接复用"
+            _put_task(_verify_tasks, task_id, payload)
+            # 仅 ok/failed 是最终结论;need_code/need_manual 是"等人工",不算验失败
+            if cid and r.state in ("ok", "failed"):
+                mark_verified(cid, r.state == "ok", "" if r.state == "ok" else r.message)
         except Exception as e:
-            with _task_lock:
-                _verify_tasks[task_id] = {"state": "failed", "message": str(e)[:200]}
+            _put_task(_verify_tasks, task_id,
+                      {"state": "failed", "message": str(e)[:200],
+                       "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
             if cid:
                 mark_verified(cid, False, str(e)[:200])
 
     threading.Thread(target=worker, daemon=True, name=f"verify-{label}").start()
-    return {"ok": True, "task": task_id,
-            "hint": "Chrome 已弹出:账密已自动填充,2FA/邮箱码请在授权弹层填入"}
+    return {"ok": True, "task": task_id, "headful": headful, "probeSite": site.get("key"),
+            "hint": ("Chrome 已弹出:账密已自动填充,2FA/邮箱码请在授权弹层填入" if headful
+                     else "已开始后台静默验证(有密码,无需弹浏览器)")}
+
+
+# 旧路径兼容:放在 /api/credentials/verify 之后注册,否则 FastAPI 按注册顺序
+# 会用本动态路由吞掉 /api/credentials/verify(account_key="verify" ⇒ 永远 404)。
+@app.post("/api/credentials/{account_key}")
+def credentials_save(account_key: str, body: dict):
+    """旧路径兼容:为账号写/绑定凭据(自动建全局凭据并引用)。"""
+    if not save_credential(
+        account_key,
+        username=str(body.get("username", "") or ""),
+        password=str(body.get("password", "") or ""),
+        totp_secret=str(body.get("totpSecret", "") or ""),
+    ):
+        raise HTTPException(404, "账号不存在或凭据为空")
+    return {"ok": True, "hint": "已加密存储(读不回显)"}
 
 
 @app.post("/api/oauth/totp")
 def oauth_totp(body: dict):
-    """实时注入 2FA 码(有头模式:手机 App 上当前 6 位码,30s 有效)。"""
+    """注入 6 位码(契约 5):接受 {code, task};转发 set_manual_code(code, task)。
+    task 可选(缺省空串走默认桶),兼容只传 code 的旧调用。"""
     code = str(body.get("code", "")).strip()
     if not (code.isdigit() and len(code) == 6):
         raise HTTPException(400, "需要 6 位数字码")
-    set_manual_code(code)
-    return {"ok": True, "hint": "已注入,授权任务会立即使用"}
+    task = str(body.get("task", "") or "")
+    if _has_param(set_manual_code, "task_id"):
+        set_manual_code(code, task)
+    else:
+        set_manual_code(code)
+    return {"ok": True, "task": task, "hint": "已注入,授权任务会立即使用"}
 
 
 @app.post("/api/reauth/{account_key}")

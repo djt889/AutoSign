@@ -311,7 +311,9 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
         # 3) 刷新验证:优先今日奖励记录到账,回退 last_login_time;额度到位
         bonus = _today_bonus(client)
         rewarded = bonus is not None or _login_rewarded_today(client)
-        report.state = "done" if rewarded else "done"
+        # 重登本身已成功 ⇒ done;rewarded 只影响文案与日志(旧写成
+        # "done" if rewarded else "done" 的 dead ternary,易误读为条件生效)
+        report.state = "done"
         if bonus is not None:
             report.awarded = bonus.get("usd")
             report.message = ("重新登录完成,奖励已到账" if bonus.get("usd")
@@ -363,7 +365,7 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
                     d = json.loads(raw)
                     dd = d.get("data") if isinstance(d, dict) else None
                     if isinstance(dd, dict) and dd.get("quota_awarded") is not None:
-                        report.awarded = round(float(dd["quota_awarded"]) / 500000, 2)
+                        report.awarded = round(float(dd["quota_awarded"]) / _unit_of(client), 2)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
                 _finish(report, client, sk, key)
@@ -450,7 +452,7 @@ def _quota(client: SiteClient) -> dict:
     d = (r.data.get("data") or {})
     quota, used = float(d.get("quota") or 0), float(d.get("used_quota") or 0)
     today = d.get("today_used_quota")
-    unit = 500000
+    unit = _unit_of(client)
     return {
         "availableUSD": round(quota / unit, 2),
         "usedUSD": round(used / unit, 2),
@@ -458,11 +460,37 @@ def _quota(client: SiteClient) -> dict:
     }
 
 
+def _unit_of(client: SiteClient) -> float:
+    """站点 quota_per_unit(与 /api/status 口径一致);取不到回退默认值。
+
+    旧实现硬编码 500000,非默认单位的站点金额会与 /api/status 显示不一致。
+    按 client 实例缓存,避免同一次签到里反复请求 /api/status。
+    """
+    from .site_client import QUOTA_PER_UNIT_DEFAULT
+    cached = getattr(client, "_unit_cache", None)
+    if cached:
+        return cached
+    unit = float(QUOTA_PER_UNIT_DEFAULT)
+    try:
+        r = client.status()
+        if r.status == 200 and isinstance(r.data, dict):
+            u = ((r.data.get("data") or {}).get("quota_per_unit"))
+            if u:
+                unit = float(u)
+    except Exception:
+        pass
+    try:
+        client._unit_cache = unit
+    except Exception:
+        pass
+    return unit
+
+
 def _awarded_from(r: CallResult, client: SiteClient) -> float | None:
     try:
         d = (r.data or {}).get("data")
         if isinstance(d, dict) and d.get("quota_awarded") is not None:
-            return round(float(d["quota_awarded"]) / 500000, 2)
+            return round(float(d["quota_awarded"]) / _unit_of(client), 2)
     except Exception:
         pass
     return None

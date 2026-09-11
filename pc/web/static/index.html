@@ -217,7 +217,8 @@ async function refresh(){
   CFG=c.cfg;TKS=(a.tokens||[]);
   render();
   // 页面打开自动取一次余额(不轮询;后端 10 分钟缓存,冷则打站点一次)
-  if(TKS.length){busy(true,'读取额度…');for(const t of TKS)if(authed(t))await loadStatus(t.key);busy(false);}
+  // 授权任务进行中(AUTHBUSY)时不抢遮罩:避免 refresh 的 busy(false) 关掉授权进度遮罩
+  if(TKS.length){if(!AUTHBUSY)busy(true,'读取额度…');for(const t of TKS)if(authed(t))await loadStatus(t.key);if(!AUTHBUSY)busy(false);}
 }
 async function loadStatus(key,force){
   const r=await api('/status/'+key+(force?'?force=1':''));
@@ -254,7 +255,8 @@ function accRow(s,a){
   const k=a.key,au=authed(a),gh=a.githubAccount?'@'+a.githubAccount:'';
   const lg=s.checkinType==='login';
   const ck=au?checkedToday(a):null;
-  const act=!au?`<button class="btn r sm" onclick="openAuth('${k}','auto')">去授权</button>`
+  const am=a.authMode==='manual'?'manual':'auto';   // 按账号授权方式分流(auto→/oauth/start,manual→/oauth/manual)
+  const act=!au?`<button class="btn r sm" onclick="startOAuth('${k}','${am}')">去授权</button>`
     :ck?`<span class="pill g">✓ 已签</span>`
     :lg?`<span class="pill g">✓ 已授权</span>`
     :`<button class="btn b sm" onclick="doCheckin('${k}')">签到</button>`;
@@ -399,24 +401,64 @@ async function startAuto(k){const gh=$('#af_gh').value.trim(),pw=$('#af_pw').val
   await post('/credentials/'+k,{username:gh||undefined,password:pw,totpSecret:tp||undefined});
   if(gh)await post('/accounts/save',{key:k,githubAccount:gh});
   closeSheet();startOAuth(k,'auto');}
-async function startOAuth(k,mode){busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
+/* ===== 授权/验证弹层公共(冻结契约 v1:running | waiting_code | waiting_manual | ok | failed) =====
+ * 弹层不预置码框:仅 waiting_code 插入 6 位码输入框;manualUrl 非空即显示「打开手动授权」按钮(即使 failed)。 */
+let AUTHBUSY=false,CURTASK=null,CODETASK=null;   // AUTHBUSY:授权进行中标记(防 refresh 抢遮罩);CURTASK:当前任务 id;CODETASK:后端给的码注入 id(非空优先)
+function showManualUrl(url){
+  const box=$('#oaManual');if(!box||!url)return;
+  if(box.dataset.url===url)return;   // 同 URL 不重复渲染
+  box.dataset.url=url;
+  box.innerHTML=`<button class="btn b w100" style="margin-top:8px" onclick="openManual()">🔗 打开手动授权</button>`;
+}
+function openManual(){const b=$('#oaManual'),u=b&&b.dataset.url;if(u)window.open(u,'_blank');}
+function insertCodeBox(hint){
+  const slot=$('#oaCode');if(!slot||$('#oa_totp'))return;   // 已插入则不重复
+  slot.innerHTML=`${hint?`<div class="hint" style="margin-top:8px">${esc(hint)}</div>`:''}
+  <div class="fld" style="margin-top:8px"><label>6 位验证码(手机 2FA App 或 GitHub 发到登录邮箱的设备验证码,30 秒内有效)</label>
+    <input id="oa_totp" inputmode="numeric" maxlength="6" placeholder="收到就填,30 秒内有效"></div>
+  <button class="btn lb w100" onclick="sendTotp()">注入验证码</button>`;
+}
+async function startOAuth(k,mode){
+  busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
   const t=await post(mode==='auto'?'/oauth/start':'/oauth/manual',{accountKey:k});
   if(!t.task){busy(false);toast(t.detail||'发起失败');return;}
-  /* 授权进行中弹层:显示进度 + 可随时填入手机 2FA 码或邮箱验证码(6 位,注入后自动使用) */
+  AUTHBUSY=true;CURTASK=t.task;CODETASK=null;
+  /* 授权进行中弹层:先只显示进度文案;按轮询到的 state 再插码框 / 手动授权按钮 */
   openSheet('授权进行中',`<div class="hint" id="oaMsg">…</div>
-  <div class="fld" style="margin-top:8px"><label>6 位验证码(手机 2FA App 或 GitHub 发到登录邮箱的设备验证码,30 秒内有效)</label>
-    <input id="oa_totp" inputmode="numeric" maxlength="6" placeholder="App 或邮件里的 6 位数字,收到就填"></div>
-  <button class="btn lb w100" onclick="sendTotp()">注入验证码</button>`);
+  <div id="oaCode"></div>
+  <div id="oaManual"></div>
+  <button class="btn lb w100" style="margin-top:10px" onclick="closeSheet()">关闭</button>`);
   const tick=async()=>{
     const s=await api('/oauth/status?task='+t.task);
     const m=$('#oaMsg');
-    if(s.state==='running'){busy(true,s.message||'授权中…');if(m)m.textContent=s.message||'授权中…';setTimeout(tick,3000);}
-    else{busy(false);closeSheet();toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+s.message);refresh();}};
-  tick();}
+    if(s.manualUrl)showManualUrl(s.manualUrl);   // 只要 manualUrl 非空就显示(含 failed)
+    if(s.codeTask)CODETASK=s.codeTask;
+    if(s.state==='waiting_code'){                // 仅此态才需要 6 位码
+      if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
+      insertCodeBox(s.hint||'');
+      busy(true,s.message||s.hint||'等待验证码…');
+      setTimeout(tick,3000);
+    }else if(s.state==='waiting_manual'){
+      if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成授权';
+      busy(true,s.message||'等待手动授权…');
+      setTimeout(tick,3000);
+    }else if(s.state==='running'){                // 仅进度,不需任何输入
+      if(m)m.textContent=s.message||'授权中…';
+      busy(true,s.message||'授权中…');
+      setTimeout(tick,3000);
+    }else{                                        // ok / failed 终态
+      AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+      if(m)m.innerHTML=(s.state==='ok'?'✅ 授权成功':'❌ 授权失败')+(s.login?` @${esc(s.login)}`:'')+(s.message?`<br>${esc(s.message)}`:'');
+      toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+(s.message||''));
+      if(s.state==='ok')refresh();
+    }
+  };
+  tick();
+}
 async function sendTotp(){
   const code=($('#oa_totp')||{}).value?.trim();
   if(!/^\d{6}$/.test(code)){toast('请输入 6 位数字码');return;}
-  const r=await post('/oauth/totp',{code});
+  const r=await post('/oauth/totp',{code,task:CODETASK||CURTASK||undefined});
   toast(r.ok?'已注入,授权任务会立即使用':'注入失败');
 }
 /* 账号添加:原版交互——从全局凭据库选(同 GitHub 一条,不重复新建),或录入新凭据 */
@@ -432,7 +474,7 @@ function addAccSheet(siteKey){
       return;
     }
     openSheet('为站点添加账号',siteSel+`<div class="hint" style="margin-bottom:6px">选择凭据(同一 GitHub 账号只需录一次,可绑定到多个站点):</div>
-      ${creds.map(c=>`<div class="menu-item" onclick="addAccWithCred('${siteKey||''}','${c.id}','${esc(c.alias||c.githubUser)}','${esc(c.githubUser||'')}')">
+      ${creds.map(c=>`<div class="menu-item" onclick="pickCred('${siteKey||''}','${c.id}','${esc(c.alias||c.githubUser)}','${esc(c.githubUser||'')}',${c.hasPassword?1:0})">
         <span style="font-weight:700;color:var(--blue)">${esc(c.alias||c.githubUser||c.id)}</span>
         ${c.githubUser?`<span class="hint">${esc(c.githubUser)}</span>`:''}
         <span style="flex:1"></span>
@@ -443,20 +485,31 @@ function addAccSheet(siteKey){
   };
   loadCreds();
 }
-async function addAccWithCred(siteKey,credId,alias,gh){
-  const k=siteKey||$('#aa_site').value;
+/* 选中凭据 → 选择授权方式(默认按凭据能力推导:有密码→auto,无密码→manual) */
+function pickCred(siteKey,credId,alias,gh,hasPw){
+  const k=siteKey||($('#aa_site')||{}).value||'';
   if(!k){toast('请选择站点');return;}
-  // 站点下已有同凭据账号 → 直接授权不重复建(原版语义)
-  const site=siteOf(k);
+  const def=hasPw?'auto':'manual';
+  openSheet('选择授权方式',`<div class="hint" style="margin-bottom:8px">账号: <b>${esc(alias||gh||credId)}</b>${gh?` (${esc(gh)})`:''}</div>
+    <div class="fld"><label>授权方式(默认按凭据能力推导:${hasPw?'有密码 → 全自动':'无密码 → 手动'})</label>
+      <select id="aa_mode">
+        <option value="auto" ${def==='auto'?'selected':''}>全自动 headless(用已存密码/2FA 自动登录)</option>
+        <option value="manual" ${def==='manual'?'selected':''}>手动弹浏览器(自己登录,不存密码)</option>
+      </select></div>
+    <button class="btn b w100" onclick="doAddAcc('${k}','${credId}','${esc(alias||gh||'')}','${esc(gh||'')}')">绑定并授权</button>`);
+}
+async function doAddAcc(siteKey,credId,alias,gh){
+  const mode=($('#aa_mode')||{}).value==='manual'?'manual':'auto';
+  // 站点下已有同凭据账号 → 只更新授权方式,不重复建(原版语义)
+  const site=siteOf(siteKey);
   const dup=(site?.accounts||[]).find(a=>a.credentialId===credId);
-  if(dup){toast('该凭据在此站已有账号,直接走授权');closeSheet();openAuth(dup.key,'auto');return;}
-  const r=await post('/accounts/save',{siteKey:k,alias:alias||gh||undefined,credentialId:credId});
-  if(r.ok){toast('已绑定凭据,开始授权');closeSheet();refresh();
-    // 新账号自动开始授权
-    const accs=await api('/accounts');
-    const created=accs.tokens?.find(a=>a.siteKey===k&&a.credentialId===credId);
-    if(created)startOAuth(created.key,'auto');
-  }else toast(r.detail||'失败');
+  const r=await post('/accounts/save',{siteKey,alias:alias||gh||undefined,credentialId:credId,authMode:mode,...(dup?{key:dup.key}:{})});
+  if(!r.ok){toast(r.detail||'失败');return;}
+  const targetKey=dup?dup.key:r.key;
+  toast(dup?'已更新授权方式,开始授权':'已绑定凭据,开始授权');
+  closeSheet();
+  await refresh();                 // await 后再授权:避免 refresh 的 busy(false) 抢掉授权遮罩
+  startOAuth(targetKey,mode);
 }
 /* 凭据库管理:录入/编辑(同 githubUser 去重)。
  * 安全策略:后端列表 API 只返回 hasPassword/hasTwofa 标记,不回显明文。
@@ -474,8 +527,8 @@ function credFormSheet(cid){
   <div class="fld"><label>TOTP 密钥(2FA setup key)${cid?`（${c.hasTwofa?'当前: 已配置':'未配置'}，留空=保留）`:''}</label>
     <input id="cf_tp" placeholder="GitHub给的16位密钥，留空保留/不配"></div>
   <button class="btn b w100" onclick="saveCredForm('${cid||''}')">保存</button>
-  ${cid?`<button class="btn lb w100" onclick="verifyCred('${cid}')">✓ 验证此凭据(弹浏览器登录一次)</button>`:''}
-  <button class="btn lb w100" onclick="verifyUnsaved()">✓ 直接验证账密(不保存,只验一次)</button>
+  ${cid?`<button class="btn lb w100" onclick="verifyCred('${cid}')">✓ 验证此凭据(有密码→后台自验;无密码→弹浏览器)</button>`:''}
+  ${cid?'':`<button class="btn lb w100" onclick="verifyUnsaved()">✓ 直接验证账密(不保存,只验一次)</button>`}
   ${cid?`<button class="btn r w100" onclick="clearCredPw('${cid}')">清除密码(切为手动授权模式)</button>`:''}`);
 }
 /* 验证凭据:保存后(如有输入) → 起 headful CDP 真窗口验证任务 → 轮询进度 */
@@ -490,7 +543,7 @@ async function verifyCred(cid){
   if(!sv.ok){toast(sv.detail||'保存失败');return;}
   const t=await post('/credentials/verify',{id:cid});
   if(!t.task){toast(t.detail||'发起失败');return;}
-  pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
+  pollVerify(t.task,t.headful?'Chrome 已弹出:请完成登录/验证码':'后台静默验证中(如遇验证码会在此提示)…');
 }
 /* 未保存模式:表单里的账密直接验一次,不落盘 */
 async function verifyUnsaved(){
@@ -498,30 +551,37 @@ async function verifyUnsaved(){
   if(!gh||!pw){toast('需要 GitHub 用户名 + 密码(只验一次,不保存)');return;}
   const t=await post('/credentials/verify',{username:gh,password:pw,twofa:tp||undefined});
   if(!t.task){toast(t.detail||'发起失败');return;}
-  pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
+  pollVerify(t.task,t.headful?'Chrome 已弹出:请完成登录/验证码':'后台静默验证中(如遇验证码会在此提示)…');
 }
 function pollVerify(task,msg){
-  openSheet('验证凭据',`<div class="hint" id="vfMsg">${esc(msg)}</div>
-  <div class="fld" style="margin-top:8px"><label>6 位验证码(手机 2FA App 或 GitHub 发到登录邮箱的设备验证码)</label>
-    <input id="vf_totp" inputmode="numeric" maxlength="6" placeholder="收到就填,30秒内有效"></div>
-  <button class="btn lb w100" onclick="sendVerifyTotp()">注入验证码</button>`);
+  AUTHBUSY=true;CURTASK=task;CODETASK=null;
+  openSheet('验证凭据',`<div class="hint" id="oaMsg">${esc(msg)}</div>
+  <div id="oaCode"></div>
+  <div id="oaManual"></div>
+  <button class="btn lb w100" style="margin-top:10px" onclick="closeSheet()">关闭</button>`);
   const tick=async()=>{
     const s=await api('/oauth/status?task='+task);
-    const m=$('#vfMsg');
-    if(s.state==='running'){if(m)m.textContent=s.message||'验证中…';setTimeout(tick,3000);}
-    else{
+    const m=$('#oaMsg');
+    if(s.manualUrl)showManualUrl(s.manualUrl);      // manualUrl 非空就显示(含 failed)
+    if(s.codeTask)CODETASK=s.codeTask;
+    if(s.state==='waiting_code'){                   // 仅此态插 6 位码框
+      if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
+      insertCodeBox(s.hint||'');
+      setTimeout(tick,3000);
+    }else if(s.state==='waiting_manual'){
+      if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成登录';
+      setTimeout(tick,3000);
+    }else if(s.state==='running'){
+      if(m)m.textContent=s.message||'验证中…';
+      setTimeout(tick,3000);
+    }else{
+      AUTHBUSY=false;CURTASK=null;CODETASK=null;
       const ok=s.state==='ok';
       if(m)m.innerHTML=(ok?'✅ ':'❌ ')+esc(s.message||s.state);
       toast((ok?'✅ 验证通过,以后绑定站点直接复用':'❌ 验证失败: '+(s.message||'')));
       if(ok)setTimeout(()=>{closeSheet();refresh();},1500);
     }};
   tick();
-}
-async function sendVerifyTotp(){
-  const code=($('#vf_totp')||{}).value?.trim();
-  if(!/^\d{6}$/.test(code)){toast('请输入 6 位数字码');return;}
-  const r=await post('/oauth/totp',{code});
-  toast(r.ok?'已注入,请等窗口自动继续':'注入失败');
 }
 async function saveCredForm(cid){
   const body={};

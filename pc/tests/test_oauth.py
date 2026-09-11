@@ -379,35 +379,32 @@ class _FakePage:
 
 def _reset_manual():
     import pc.engine.oauth_flow as of
-    of._manual_code = ""
+    of._clear_manual_codes()
 
 
 def test_fill_totp_email_code_branch():
-    """邮箱验证码页(verified-device):只用手动码,不碰 authenticator 切换,不需要 TOTP 密钥。"""
+    """邮箱验证码页(verified-device):只用手动码,不碰 authenticator 切换,不需要 TOTP 密钥。
+
+    契约 v1:`_fill_totp(page, credential, code)` 的 code 由调用方一次性取出后传入。
+    """
     import pc.engine.oauth_flow as of
     _reset_manual()
-    of.set_manual_code("123456")
-    page = _FakePage("https://github.com/verified-device", ["OTP_SEL"])
-    # 用短选择器名:FakePage 按完全匹配计 present,实现里是多选择器组合串——
-    # 这里直接断言 filled 非空且值为手动码
-    import pc.engine.oauth_flow as of2
-    page2 = _FakePage("https://github.com/verified-device", [])
+    page = _FakePage("https://github.com/verified-device", [])
     # 给 FakePage 加通配:任意 locator 都 present(模拟输入框一定存在)
     _FakeLocator.count = lambda self: 1
-    assert of._fill_totp(page2, {}) is True
-    assert page2.filled and page2.filled[0][1] == "123456"
+    assert of._fill_totp(page, {}, "123456") is True
+    assert page.filled and page.filled[0][1] == "123456"
     # 邮箱分支不点 authenticator 切换链接
     assert not any("authenticator" in c for c in page.clicked)
     _reset_manual()
 
 
 def test_fill_totp_totp_branch_with_link():
-    """TOTP 页:先点 authenticator 切换,再填密钥生成的码。"""
+    """TOTP 页:先点 authenticator 切换,再填调用方传入的码。"""
     import pc.engine.oauth_flow as of
     _reset_manual()
     page = _FakePage("https://github.com/sessions/two-factor/app", [])
-    of.set_manual_code("654321")
-    assert of._fill_totp(page, {"totpSecret": "AAAAAAAAAAAAAAAA"}) is True
+    assert of._fill_totp(page, {"totpSecret": "AAAAAAAAAAAAAAAA"}, "654321") is True
     assert any("authenticator" in c for c in page.clicked)
     assert page.filled and page.filled[0][1] == "654321"
     _reset_manual()

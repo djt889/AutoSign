@@ -97,9 +97,31 @@ def _persist(site: dict, account: dict, r: AuthResult) -> None:
     config_svc.update(_mut)
 
 
+def _authorize_kwargs(task_id: str, on_state) -> dict:
+    """按冻结契约 v1 §2 向 authorize 传 task_id/on_state;旧签名自动降级(不报错)。"""
+    import inspect
+    kw: dict = {}
+    try:
+        params = inspect.signature(authorize).parameters
+    except (TypeError, ValueError):
+        return kw
+    if task_id and "task_id" in params:
+        kw["task_id"] = task_id
+    if on_state is not None and "on_state" in params:
+        kw["on_state"] = on_state
+    return kw
+
+
 def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = None,
-             force: bool = False, headful: bool = False) -> AuthResult:
-    """静默换凭据(带三重防风暴)。force=True 跳过冷却与复用(手动授权用)。"""
+             force: bool = False, headful: bool = False,
+             task_id: str = "", on_state=None) -> AuthResult:
+    """静默换凭据(带三重防风暴)。force=True 跳过冷却与复用(手动授权用)。
+
+    task_id/on_state:契约 §2 透传给 authorize,需要用户介入时(need_code/
+    need_manual)经 on_state 通知调用方,流程仍由 authorize 在后台继续。
+    need_code/need_manual 表示"需人工",不计入失败冷却(否则用户拿到码后
+    90s 内无法重试)。
+    """
     ak = account.get("key", "?")
     sk = site.get("key", "?")
 
@@ -112,12 +134,15 @@ def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = Non
                 if _fail_until.get(ak, 0) > now:
                     return AuthResult("failed", "失败冷却中(90s),稍后自动重试或手动授权")
 
-        r = authorize(site, account, cfg, credential, headful=headful)
+        r = authorize(site, account, cfg, credential, headful=headful,
+                      **_authorize_kwargs(task_id, on_state))
 
         with _meta_lock:
             if r.state == "ok":
                 _last_ok[ak] = time.time() * 1000
                 _fail_until.pop(ak, None)
+            elif r.state in ("need_code", "need_manual"):
+                _fail_until.pop(ak, None)     # 等人工介入,不设冷却
             else:
                 _fail_until[ak] = time.time() * 1000 + FAIL_COOLDOWN_MS
 
@@ -128,8 +153,9 @@ def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = Non
                 "login": r.github_login,
             })
         else:
+            lvl = "info" if r.state in ("need_code", "need_manual") else "err"
             db.append_log(sk, ak, "silent-auth",
-                          {"state": r.state, "error": r.message[:120]}, "err")
+                          {"state": r.state, "error": r.message[:120]}, lvl)
         return r
 
 

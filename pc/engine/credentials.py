@@ -59,6 +59,15 @@ def list_credentials(secrets: bool = False) -> list[dict]:
     return out
 
 
+def derive_auth_mode(credential_id: str) -> str:
+    """凭据默认授权方式(冻结契约 v1 §6):有密码 ⇒ auto(可静默自验),
+    无密码 ⇒ manual(需人工有头授权)。凭据不存在也按 manual 处理。
+    """
+    cfg = config_svc.load()
+    c = _find(cfg, credential_id) if credential_id else None
+    return "auto" if (c and c.get("password")) else "manual"
+
+
 def mark_verified(credential_id: str, ok: bool, error: str = "") -> bool:
     """写验证结果:ok ⇒ verified=ok + verifiedAt=now;失败 ⇒ verified=failed + 原因。"""
     import time as _time
@@ -81,6 +90,43 @@ def mark_verified(credential_id: str, ok: bool, error: str = "") -> bool:
     return found["ok"]
 
 
+def _upsert_in_cfg(cfg: dict, alias: str = "", github_user: str = "",
+                   site_account: str = "", password: str | None = None,
+                   twofa: str | None = None, note: str = "",
+                   credential_id: str = "") -> dict:
+    """upsert 核心(须在 config.update 事务内调用,就地改 cfg)。"""
+    creds = _load_creds(cfg)
+    target = None
+    created = duplicated = False
+    if credential_id:
+        target = _find(cfg, credential_id)
+        if not target:
+            raise ValueError("凭据不存在: " + credential_id)
+    elif github_user:
+        target = next((c for c in creds
+                       if (c.get("githubUser") or "").lower() == github_user.lower()), None)
+        duplicated = target is not None
+    if not target:
+        target = {"id": "cred_" + str(__import__("time").time() * 1000).split(".")[0]}
+        creds.append(target)
+        created = True
+
+    if alias:
+        target["alias"] = alias
+    if github_user:
+        target["githubUser"] = github_user
+    if site_account:
+        target["siteAccount"] = site_account
+    if password is not None:
+        target["password"] = crypto.encrypt(password) if password else ""
+    if twofa is not None:
+        target["twofa"] = crypto.encrypt(twofa) if twofa else ""
+    if note:
+        target["note"] = note
+    cfg["credentials"] = creds
+    return {"id": target["id"], "created": created, "duplicated": duplicated}
+
+
 def upsert_credential(alias: str = "", github_user: str = "", site_account: str = "",
                       password: str | None = None, twofa: str | None = None,
                       note: str = "", credential_id: str = "") -> dict:
@@ -89,41 +135,15 @@ def upsert_credential(alias: str = "", github_user: str = "", site_account: str 
     同 githubUser 已存在 ⇒ 返回已有条目(不重复建);显式传 credential_id 则更新它。
     返回 {id, created: bool, duplicated: bool}。
     """
-    target = None
-    created = duplicated = False
+    out: dict = {}
 
     def _mut(cfg):
-        nonlocal target, created, duplicated
-        creds = _load_creds(cfg)
-        if credential_id:
-            target = _find(cfg, credential_id)
-            if not target:
-                raise ValueError("凭据不存在: " + credential_id)
-        elif github_user:
-            target = next((c for c in creds
-                           if (c.get("githubUser") or "").lower() == github_user.lower()), None)
-            duplicated = target is not None
-        if not target:
-            target = {"id": "cred_" + str(__import__("time").time() * 1000).split(".")[0]}
-            creds.append(target)
-            created = True
-
-        if alias:
-            target["alias"] = alias
-        if github_user:
-            target["githubUser"] = github_user
-        if site_account:
-            target["siteAccount"] = site_account
-        if password is not None:
-            target["password"] = crypto.encrypt(password) if password else ""
-        if twofa is not None:
-            target["twofa"] = crypto.encrypt(twofa) if twofa else ""
-        if note:
-            target["note"] = note
-        cfg["credentials"] = creds
+        out.update(_upsert_in_cfg(
+            cfg, alias=alias, github_user=github_user, site_account=site_account,
+            password=password, twofa=twofa, note=note, credential_id=credential_id))
 
     config_svc.update(_mut)
-    return {"id": target["id"], "created": created, "duplicated": duplicated}
+    return out
 
 
 def delete_credential(cid: str) -> bool:
@@ -210,30 +230,38 @@ def get_credential(account_key: str) -> dict[str, str]:
 
 def save_credential(account_key: str, username: str = "", password: str = "",
                     totp_secret: str = "") -> bool:
-    """旧调用兼容:往账号对应凭据写(若账号无 credentialId 则按 githubUser 建全局凭据并绑定)。"""
-    cfg = config_svc.load()
-    found = config_svc.find_account(cfg, account_key)
-    if not found:
-        return False
-    _, acc = found
-    gh = username or acc.get("githubAccount") or ""
-    if acc.get("credentialId"):
-        cid = acc["credentialId"]
-    elif gh:
-        r = upsert_credential(github_user=gh, alias=acc.get("alias") or gh,
-                              password=password or None, twofa=totp_secret or None)
-        cid = r["id"]
-        acc["credentialId"] = cid
-        config_svc.save(cfg)
-    else:
-        return False
-    # 有 cid 后走全局库 upsert
-    try:
-        upsert_credential(credential_id=cid, password=password or None,
-                          twofa=totp_secret or None)
-    except ValueError:
-        return False
-    return True
+    """旧调用兼容:往账号对应凭据写(若账号无 credentialId 则按 githubUser 建全局凭据并绑定)。
+
+    整段在单个 config.update 事务内完成——旧实现用 load()+save() 包着
+    upsert_credential,会用 upsert 前的旧快照覆盖落盘,把刚建的凭据抹掉
+    (实测:改完账号 credentialId 指向已消失的凭据)。
+    """
+    result = {"ok": False}
+
+    def _mut(cfg):
+        found = config_svc.find_account(cfg, account_key)
+        if not found:
+            return
+        _, acc = found
+        gh = username or acc.get("githubAccount") or ""
+        cid = acc.get("credentialId") or ""
+        if cid:
+            try:
+                _upsert_in_cfg(cfg, credential_id=cid,
+                               password=password or None, twofa=totp_secret or None)
+            except ValueError:
+                return
+            result["ok"] = True
+            return
+        if not gh:
+            return
+        r = _upsert_in_cfg(cfg, github_user=gh, alias=acc.get("alias") or gh,
+                           password=password or None, twofa=totp_secret or None)
+        acc["credentialId"] = r["id"]
+        result["ok"] = True
+
+    config_svc.update(_mut)
+    return result["ok"]
 
 
 def totp_now(credential: dict[str, str]) -> str:
@@ -248,30 +276,35 @@ def totp_now(credential: dict[str, str]) -> str:
 
 
 def migrate_legacy_enc() -> int:
-    """迁移:旧 encCredential(账号内嵌) → 全局凭据库(同 githubUser 去重)。"""
-    cfg = config_svc.load()
-    n = 0
-    for s in cfg.get("sites", []):
-        for a in s.get("accounts") or []:
-            enc = a.get("encCredential") or ""
-            if not enc or a.get("credentialId"):
-                continue
-            try:
-                d = json.loads(crypto.decrypt(enc))
-            except crypto.CryptoError:
-                continue
-            gh = d.get("username") or a.get("githubAccount") or ""
-            if not gh:
-                continue
-            try:
-                r = upsert_credential(
-                    github_user=gh, alias=a.get("alias") or gh,
-                    password=d.get("password") or None,
-                    twofa=d.get("totpSecret") or None)
-            except Exception:
-                continue
-            a["credentialId"] = r["id"]
-            a.pop("encCredential", None)
-            n += 1
-    config_svc.save(cfg)
-    return n
+    """迁移:旧 encCredential(账号内嵌) → 全局凭据库(同 githubUser 去重)。
+
+    单个 config.update 事务内完成(旧实现 load+循环 upsert+save 会用旧快照
+    覆盖掉 upsert 刚建的凭据)。
+    """
+    n = {"v": 0}
+
+    def _mut(cfg):
+        for s in cfg.get("sites", []):
+            for a in s.get("accounts") or []:
+                enc = a.get("encCredential") or ""
+                if not enc or a.get("credentialId"):
+                    continue
+                try:
+                    d = json.loads(crypto.decrypt(enc))
+                except crypto.CryptoError:
+                    continue
+                gh = d.get("username") or a.get("githubAccount") or ""
+                if not gh:
+                    continue
+                try:
+                    r = _upsert_in_cfg(cfg, github_user=gh, alias=a.get("alias") or gh,
+                                       password=d.get("password") or None,
+                                       twofa=d.get("totpSecret") or None)
+                except Exception:
+                    continue
+                a["credentialId"] = r["id"]
+                a.pop("encCredential", None)
+                n["v"] += 1
+
+    config_svc.update(_mut)
+    return n["v"]
