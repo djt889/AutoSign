@@ -10,25 +10,48 @@
 | **WebUI 服务端**（推荐） | `pc/` | Python + FastAPI 服务，浏览器访问，手机/桌面自适应；可常驻后台按定时自动跑 |
 | **Android App** | `android/` | 原生安卓端（来自上游，保留） |
 
-> 仓库名 `justsign`，Android 包名 `icu.justwoker.justsign`。
+> Android 包名 `icu.justwoker.justsign`（历史沿用，与仓库名无关）。
 
 ## 快速开始（WebUI）
 
 需要 Python 3.10 及以上（开发与测试环境为 3.13）。
 
+### 方式一：双击启动脚本（推荐）
+
+脚本会自动检测 Python、创建虚拟环境、安装依赖，然后启动服务：
+
+| 系统 | 脚本 |
+| :--- | :--- |
+| Windows | 双击 `start-server.cmd` |
+| Linux / macOS | 终端执行 `./start-server.sh`（首次需 `chmod +x start-server.sh`） |
+
+启动后浏览器打开 **http://127.0.0.1:37421** 即可。首次运行需要几分钟装依赖，之后启动是秒级。
+
+### 方式二：手动安装
+
 ```bash
 pip install -r pc/requirements.txt
-scrapling install                 # 授权/签到需要的浏览器内核
 python -m pc.main                 # 默认 http://127.0.0.1:37421
 ```
 
-浏览器打开 `http://127.0.0.1:37421` 即可。API 文档在 `/docs`。
+API 文档在 `/docs`。
 
-Windows 上还有两个现成脚本：
+### 可选：浏览器内核
 
-- `start-server.cmd` —— 双击前台启动（显示日志，Ctrl+C 停止）
-- `deploy/run-server-bg.cmd` —— 无窗口后台常驻（供计划任务调用）
-- `deploy/AutoSign.xml` —— 计划任务定义，开机登录即启动、异常自动拉起
+授权/签到的验证码环节需要浏览器内核。装了就能用「全自动授权」：
+
+```bash
+python -m scrapling install
+```
+
+不装也能用，授权时改选「手动浏览器」方式即可。
+
+### 后台常驻（Windows）
+
+- `deploy/run-server-bg.cmd` —— 无窗口后台启动（供计划任务调用）
+- `deploy/AutoSign.xml` —— 计划任务定义，登录即启动、异常自动拉起
+
+先双击一次 `start-server.cmd` 完成初始化，再把 `deploy/AutoSign.xml` 导入任务计划程序即可。
 
 ## WebUI 功能
 

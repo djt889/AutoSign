@@ -28,7 +28,7 @@ from .engine.silent_auth import clear_cooldown, exchange
 from .service import config, db
 from .service.scheduler import run_all_once, scheduler_status, start_scheduler
 
-app = FastAPI(title="justsign", version="0.1.0-py")
+app = FastAPI(title="AutoSign", version="1.0.0")
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 HOST = os.environ.get("JUSTSIGN_HOST", "0.0.0.0")

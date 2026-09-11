@@ -1,0 +1,18 @@
+# 默认:文本文件入库用 LF,checkout 时按平台转换
+* text=auto
+
+# Windows 批处理必须是 CRLF,否则在 Windows 上执行会报错
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell 脚本保持 LF
+*.sh text eol=lf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.jks binary
+*.keystore binary
+*.apk binary
+*.dmg binary

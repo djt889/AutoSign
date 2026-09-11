@@ -16,8 +16,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-import httpx
-
 QUOTA_PER_UNIT_DEFAULT = 500000
 NEED_CAPTCHA_RE = re.compile(
     r"turnstile|captcha|验证|校验|人机|challenge|robot", re.IGNORECASE
