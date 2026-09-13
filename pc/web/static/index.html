@@ -173,7 +173,19 @@ input,select{font-family:inherit;color:var(--txt)}
 
 <script>
 const $=s=>document.querySelector(s);
-const api=(p,o)=>fetch('/api'+p,o).then(r=>r.json());
+/* 统一容错:网络失败/HTTP 非 2xx/响应非 JSON 一律返回 {ok:false,...} 对象,调用点不再拿到异常 */
+const api=async(p,o)=>{
+  let r;
+  try{r=await fetch('/api'+p,o);}
+  catch(_){return{ok:false,detail:'连接服务失败'};}
+  if(!r.ok){
+    let d='服务异常(HTTP '+r.status+')';
+    try{const j=await r.json();if(j&&typeof(j.detail||j.message)==='string')d=j.detail||j.message;}catch(_){}   // 保留后端原因(如"任务不存在")
+    return{ok:false,status:r.status,detail:d};
+  }
+  try{return await r.json();}
+  catch(_){return{ok:false,status:r.status,detail:'服务异常(HTTP '+r.status+',响应解析失败)'};}
+};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const USD=n=>(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 let CFG=null,TKS=[],page=0;
@@ -214,11 +226,15 @@ function paintQuota(k,q){
 /* ===== 数据:打开页面拉一次(10分钟缓存内秒回),其余靠「刷新」按钮 ===== */
 async function refresh(){
   const[c,a]=await Promise.all([api('/config'),api('/accounts')]);
+  if(!c.ok||!a.ok){toast('读取数据失败: '+(c.detail||a.detail||'服务异常'));render();return;}   // 失败也渲染(空态/旧数据),不卡在"…"
   CFG=c.cfg;TKS=(a.tokens||[]);
   render();
   // 页面打开自动取一次余额(不轮询;后端 10 分钟缓存,冷则打站点一次)
   // 授权任务进行中(AUTHBUSY)时不抢遮罩:避免 refresh 的 busy(false) 关掉授权进度遮罩
-  if(TKS.length){if(!AUTHBUSY)busy(true,'读取额度…');for(const t of TKS)if(authed(t))await loadStatus(t.key);if(!AUTHBUSY)busy(false);}
+  if(TKS.length){
+    try{if(!AUTHBUSY)busy(true,'读取额度…');for(const t of TKS)if(authed(t))await loadStatus(t.key);}
+    finally{if(!AUTHBUSY)busy(false);}   // 无论中途发生什么,busy 必然复位
+  }
 }
 async function loadStatus(key,force){
   const r=await api('/status/'+key+(force?'?force=1':''));
@@ -300,7 +316,7 @@ function renderSettings(){
       <span style="color:var(--sub2);cursor:pointer" onclick="siteMenu('${s.key}')">⋯</span></div>`).join('')||'<div class="hint" style="padding:4px 0">暂无站点</div>'}
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <button class="btn lb sm" onclick="addSiteSheet()">＋ 添加站点</button>
-      <button class="btn lb sm" onclick="post('/setup').then(()=>{toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
+      <button class="btn lb sm" onclick="post('/setup').then(r=>{if(!r.ok){toast(r.detail||'载入失败');return;}toast('内置四站已载入');refresh()})">载入内置四站</button></div></div>
   <div class="msetcard"><h3>账号凭据库</h3>
     <div class="hint" style="margin-bottom:6px">GitHub 账号凭据全局一条,可绑定多个站点。已录入 <b id="credCount">…</b> 条。</div>
     <div class="hint" style="margin-bottom:6px">全自动:存密码/2FA,签到续期全自动；手动:授权时弹浏览器自己登录,不存密码。</div>
@@ -311,9 +327,9 @@ function renderSettings(){
     <div class="mset-it"><span class="nm">🔑 授权方式说明</span><span class="sp"></span><button class="btn lb sm" onclick="authDoc()">查看</button></div>
     <div class="mset-it"><span class="nm">📜 本地运行日志</span><span class="sp"></span><button class="btn lb sm" onclick="openLocalLog()">查看</button></div>
     <div class="mset-it"><span class="nm">📡 实时日志(SSE)</span><span class="sp"></span><button class="btn lb sm" onclick="openLiveLog()">打开</button></div>
-    <div class="mset-it"><span class="nm">▶ 立即跑一轮全部账号</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('立即执行','对所有已授权账号跑一轮签到?',async()=>{const r=await post('/run-all');toast(r.message||'已触发(后台执行,看实时日志)');})">执行</button></div>
-    <div class="mset-it"><span class="nm">💾 数据维护(存量加密)</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('一键加密','把存量明文 token/cookie 一次性加密(幂等)?',async()=>{const r=await post('/seal-existing');toast(r.ok?'已加密 '+r.sealed_accounts+' 个账号':'失败')})">一键加密</button></div></div>`;
-  api('/credentials').then(c=>{const e=$('#credCount');if(e)e.textContent=(c.credentials||[]).length;});
+    <div class="mset-it"><span class="nm">▶ 立即跑一轮全部账号</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('立即执行','对所有已授权账号跑一轮签到?',async()=>{const r=await post('/run-all');toast(r.ok?(r.message||'已触发(后台执行,看实时日志)'):(r.detail||'触发失败'));})">执行</button></div>
+    <div class="mset-it"><span class="nm">💾 数据维护(存量加密)</span><span class="sp"></span><button class="btn lb sm" onclick="confirmDlg('一键加密','把存量明文 token/cookie 一次性加密(幂等)?',async()=>{const r=await post('/seal-existing');toast(r.ok?'已加密 '+r.sealed_accounts+' 个账号':(r.detail||'加密失败'))})">一键加密</button></div></div>`;
+  api('/credentials').then(c=>{if(!c.ok)return;const e=$('#credCount');if(e)e.textContent=(c.credentials||[]).length;});
 }
 function showPage(p){
   page=p;
@@ -336,7 +352,7 @@ async function doCheckin(k){
   busy(true,'签到中(两级人机验证全自动)…');
   try{
     const r=await post('/checkin/'+k);
-    toast(r.message||JSON.stringify(r));
+    toast(r.message||r.detail||'操作失败');
     if(r.ok&&(r.state==='done'||r.state==='already')){
       markCheckedToday(k,r.state,r.awarded);
       const tt=TKS.find(x=>x.key===k);
@@ -371,8 +387,17 @@ async function bulkCheckin(){
   // 已签/刚签的账号强制刷一次额度(绕缓存,后端签到已清缓存)
   for(const{k,r}of rs)if(r.ok)await loadStatus(k,true);
 }
-async function bulkRefresh(){const ts=TKS.filter(authed);if(!ts.length){toast('没有已授权账号');return;}busy(true,'一键刷新额度…');await Promise.all(ts.map(t=>loadStatus(t.key,true)));busy(false);toast('✅ 刷新完成');}
-async function delAccount(k){confirmDlg('删除账号','确认删除该账号?',async()=>{await api('/accounts/'+k,{method:'DELETE'});toast('已删除');refresh();});}
+async function bulkRefresh(){
+  const ts=TKS.filter(authed);
+  if(!ts.length){toast('没有已授权账号');return;}
+  busy(true,'一键刷新额度…');
+  try{
+    const rs=await Promise.allSettled(ts.map(t=>loadStatus(t.key,true)));   // 单账号失败不阻断
+    const n=rs.filter(x=>x.status==='fulfilled'&&x.value&&x.value.ok).length;
+    toast(n===ts.length?`✅ 刷新完成 ${n}/${ts.length}`:`⚠️ 刷新完成 ${n}/${ts.length},部分失败`);
+  }finally{busy(false);}   // 必然复位
+}
+async function delAccount(k){confirmDlg('删除账号','确认删除该账号?',async()=>{const r=await api('/accounts/'+k,{method:'DELETE'});if(!r.ok){toast(r.detail||'删除失败');return;}toast('已删除');refresh();});}
 function accMenu(k){openSheet('账号操作',`<div class="menu-item" onclick="closeSheet();openAuth('${k}','auto')"><span class="ic">🔑</span>全自动授权(headless)</div>
   <div class="menu-item" onclick="closeSheet();openAuth('${k}','manual')"><span class="ic">🖥️</span>手动登录授权(弹浏览器,不存密码)</div>
   <div class="menu-item" onclick="closeSheet();reauthAcc('${k}')"><span class="ic">↻</span>重新授权(静默换凭据)</div>
@@ -381,11 +406,11 @@ function accMenu(k){openSheet('账号操作',`<div class="menu-item" onclick="cl
 async function reauthAcc(k){
   busy(true,'静默换凭据中…');
   const r=await post('/reauth/'+k);
-  busy(false);toast(r.ok?'✅ 换新成功':'❌ '+r.message);refresh();
+  busy(false);toast(r.ok?'✅ 换新成功':'❌ '+(r.message||r.detail||'失败'));refresh();
 }
 function siteMenu(k){openSheet('站点操作',`<div class="menu-item" onclick="closeSheet();editSiteSheet('${k}')"><span class="ic">✎</span>编辑站点</div>
   <div class="menu-item" onclick="closeSheet();addAccSheet('${k}')"><span class="ic">＋</span>添加账号</div>
-  <div class="menu-item red" onclick="closeSheet();confirmDlg('删除站点','确认删除该站点及其全部账号?',async()=>{await api('/sites/${k}',{method:'DELETE'});toast('已删除');refresh();})"><span class="ic">🗑</span>删除站点</div>`);}
+  <div class="menu-item red" onclick="closeSheet();confirmDlg('删除站点','确认删除该站点及其全部账号?',async()=>{const r=await api('/sites/${k}',{method:'DELETE'});if(!r.ok){toast(r.detail||'删除失败');return;}toast('已删除');refresh();})"><span class="ic">🗑</span>删除站点</div>`);}
 /* 授权 */
 function openAuth(k,mode){
   if(mode==='manual'){openSheet('手动登录授权',`<div class="hint" style="margin-bottom:10px">将弹出浏览器窗口:自己输入 GitHub 密码/2FA 并授权。<b>不保存密码</b>,仅登录态存本服务器,之后签到/续期全自动。</div>
@@ -398,8 +423,9 @@ function openAuth(k,mode){
   <button class="btn b w100" onclick="startAuto('${k}')">保存凭据并授权</button>`);
 }
 async function startAuto(k){const gh=$('#af_gh').value.trim(),pw=$('#af_pw').value,tp=$('#af_tp').value.trim();if(!pw){toast('需要密码');return;}
-  await post('/credentials/'+k,{username:gh||undefined,password:pw,totpSecret:tp||undefined});
-  if(gh)await post('/accounts/save',{key:k,githubAccount:gh});
+  const r1=await post('/credentials/'+k,{username:gh||undefined,password:pw,totpSecret:tp||undefined});
+  if(!r1.ok){toast(r1.detail||'凭据保存失败');return;}
+  if(gh){const r2=await post('/accounts/save',{key:k,githubAccount:gh});if(!r2.ok){toast(r2.detail||'账号保存失败');return;}}
   closeSheet();startOAuth(k,'auto');}
 /* ===== 授权/验证弹层公共(冻结契约 v1:running | waiting_code | waiting_manual | ok | failed) =====
  * 弹层不预置码框:仅 waiting_code 插入 6 位码输入框;manualUrl 非空即显示「打开手动授权」按钮(即使 failed)。 */
@@ -419,38 +445,62 @@ function insertCodeBox(hint){
   <button class="btn lb w100" onclick="sendTotp()">注入验证码</button>`;
 }
 async function startOAuth(k,mode){
+  if(AUTHBUSY){toast('已有授权/验证任务进行中,请稍候再试');return;}   // 并发守卫:防两个 tick 串扰 CURTASK
+  AUTHBUSY=true;   // 入口即占位(post 等待期间也生效)
   busy(true,mode==='auto'?'headless 全自动授权中…':'浏览器已弹出,请在窗口完成登录');
   const t=await post(mode==='auto'?'/oauth/start':'/oauth/manual',{accountKey:k});
-  if(!t.task){busy(false);toast(t.detail||'发起失败');return;}
-  AUTHBUSY=true;CURTASK=t.task;CODETASK=null;
+  if(!t.task){AUTHBUSY=false;busy(false);toast(t.detail||'发起失败');return;}
+  CURTASK=t.task;CODETASK=null;
   /* 授权进行中弹层:先只显示进度文案;按轮询到的 state 再插码框 / 手动授权按钮 */
   openSheet('授权进行中',`<div class="hint" id="oaMsg">…</div>
   <div id="oaCode"></div>
   <div id="oaManual"></div>
   <button class="btn lb w100" style="margin-top:10px" onclick="closeSheet()">关闭</button>`);
+  let fails=0;   // 轮询连续失败计数(成功即清零)
   const tick=async()=>{
-    const s=await api('/oauth/status?task='+t.task);
-    const m=$('#oaMsg');
-    if(s.manualUrl)showManualUrl(s.manualUrl);   // 只要 manualUrl 非空就显示(含 failed)
-    if(s.codeTask)CODETASK=s.codeTask;
-    if(s.state==='waiting_code'){                // 仅此态才需要 6 位码
-      if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
-      insertCodeBox(s.hint||'');
-      busy(true,s.message||s.hint||'等待验证码…');
-      setTimeout(tick,3000);
-    }else if(s.state==='waiting_manual'){
-      if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成授权';
-      busy(true,s.message||'等待手动授权…');
-      setTimeout(tick,3000);
-    }else if(s.state==='running'){                // 仅进度,不需任何输入
-      if(m)m.textContent=s.message||'授权中…';
-      busy(true,s.message||'授权中…');
-      setTimeout(tick,3000);
-    }else{                                        // ok / failed 终态
+    try{
+      const s=await api('/oauth/status?task='+t.task);
+      if(!s.state){                                // 统一错误对象:网络/服务层失败
+        if(s.status===404){                        // 任务被服务端清理/重启丢失:按失败终态,显示原因
+          AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+          const m=$('#oaMsg');if(m)m.innerHTML='❌ 授权失败<br>'+esc(s.detail||'任务不存在或已清理');
+          toast('❌ 授权任务已失效: '+(s.detail||'任务不存在'));
+          return;
+        }
+        if(++fails<5){setTimeout(tick,3000);return;}   // 瞬时故障重试,连续 5 次才判失败
+        AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+        const m=$('#oaMsg');if(m)m.innerHTML='❌ 连接服务失败'+(s.detail?`(${esc(s.detail)})`:'');
+        toast('❌ 连接服务失败,授权已中止');
+        return;
+      }
+      fails=0;
+      const m=$('#oaMsg');
+      if(s.manualUrl)showManualUrl(s.manualUrl);   // 只要 manualUrl 非空就显示(含 failed)
+      if(s.codeTask)CODETASK=s.codeTask;
+      if(s.state==='waiting_code'){                // 仅此态才需要 6 位码
+        if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
+        insertCodeBox(s.hint||'');
+        busy(true,s.message||s.hint||'等待验证码…');
+        setTimeout(tick,3000);
+      }else if(s.state==='waiting_manual'){
+        if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成授权';
+        busy(true,s.message||'等待手动授权…');
+        setTimeout(tick,3000);
+      }else if(s.state==='running'){                // 仅进度,不需任何输入
+        if(m)m.textContent=s.message||'授权中…';
+        busy(true,s.message||'授权中…');
+        setTimeout(tick,3000);
+      }else{                                        // ok / failed 终态
+        AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+        const why=s.message||s.detail||'';          // 失败原因可能在 detail
+        if(m)m.innerHTML=(s.state==='ok'?'✅ 授权成功':'❌ 授权失败')+(s.login?` @${esc(s.login)}`:'')+(why?`<br>${esc(why)}`:'');
+        toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+why);
+        if(s.state==='ok')refresh();
+      }
+    }catch(e){                                     // 兜底:任何意外异常都复位,不静默卡死
       AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
-      if(m)m.innerHTML=(s.state==='ok'?'✅ 授权成功':'❌ 授权失败')+(s.login?` @${esc(s.login)}`:'')+(s.message?`<br>${esc(s.message)}`:'');
-      toast((s.state==='ok'?'✅ 授权成功 @':'❌ ')+(s.login||'')+' '+(s.message||''));
-      if(s.state==='ok')refresh();
+      const m=$('#oaMsg');if(m)m.textContent='❌ 授权流程异常,已中止: '+((e&&e.message)||e);
+      toast('❌ 授权流程异常,已中止');
     }
   };
   tick();
@@ -459,13 +509,14 @@ async function sendTotp(){
   const code=($('#oa_totp')||{}).value?.trim();
   if(!/^\d{6}$/.test(code)){toast('请输入 6 位数字码');return;}
   const r=await post('/oauth/totp',{code,task:CODETASK||CURTASK||undefined});
-  toast(r.ok?'已注入,授权任务会立即使用':'注入失败');
+  toast(r.ok?'已注入,授权任务会立即使用':(r.detail||'注入失败'));
 }
 /* 账号添加:原版交互——从全局凭据库选(同 GitHub 一条,不重复新建),或录入新凭据 */
 function addAccSheet(siteKey){
   const sites=CFG?.sites||[];
   const loadCreds=async()=>{
     const c=await api('/credentials');
+    if(!c.ok){toast(c.detail||'读取凭据失败');return;}
     const creds=c.credentials||[];
     const siteSel=siteKey?'':`<div class="fld"><label>绑定站点</label><select id="aa_site">${sites.map(s=>`<option value="${s.key}">${esc(s.name)}</option>`).join('')}</select></div>`;
     if(!creds.length){
@@ -554,32 +605,55 @@ async function verifyUnsaved(){
   pollVerify(t.task,t.headful?'Chrome 已弹出:请完成登录/验证码':'后台静默验证中(如遇验证码会在此提示)…');
 }
 function pollVerify(task,msg){
+  if(AUTHBUSY){toast('已有授权/验证任务进行中,请稍候再试');return;}   // 并发守卫:防两个 tick 串扰 CURTASK
   AUTHBUSY=true;CURTASK=task;CODETASK=null;
   openSheet('验证凭据',`<div class="hint" id="oaMsg">${esc(msg)}</div>
   <div id="oaCode"></div>
   <div id="oaManual"></div>
   <button class="btn lb w100" style="margin-top:10px" onclick="closeSheet()">关闭</button>`);
+  let fails=0;   // 轮询连续失败计数(成功即清零)
   const tick=async()=>{
-    const s=await api('/oauth/status?task='+task);
-    const m=$('#oaMsg');
-    if(s.manualUrl)showManualUrl(s.manualUrl);      // manualUrl 非空就显示(含 failed)
-    if(s.codeTask)CODETASK=s.codeTask;
-    if(s.state==='waiting_code'){                   // 仅此态插 6 位码框
-      if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
-      insertCodeBox(s.hint||'');
-      setTimeout(tick,3000);
-    }else if(s.state==='waiting_manual'){
-      if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成登录';
-      setTimeout(tick,3000);
-    }else if(s.state==='running'){
-      if(m)m.textContent=s.message||'验证中…';
-      setTimeout(tick,3000);
-    }else{
-      AUTHBUSY=false;CURTASK=null;CODETASK=null;
-      const ok=s.state==='ok';
-      if(m)m.innerHTML=(ok?'✅ ':'❌ ')+esc(s.message||s.state);
-      toast((ok?'✅ 验证通过,以后绑定站点直接复用':'❌ 验证失败: '+(s.message||'')));
-      if(ok)setTimeout(()=>{closeSheet();refresh();},1500);
+    try{
+      const s=await api('/oauth/status?task='+task);
+      if(!s.state){                                   // 统一错误对象:网络/服务层失败
+        if(s.status===404){                           // 任务被服务端清理/重启丢失:按失败终态,显示原因
+          AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+          const m=$('#oaMsg');if(m)m.innerHTML='❌ 验证失败<br>'+esc(s.detail||'任务不存在或已清理');
+          toast('❌ 验证任务已失效: '+(s.detail||'任务不存在'));
+          return;
+        }
+        if(++fails<5){setTimeout(tick,3000);return;}  // 瞬时故障重试,连续 5 次才判失败
+        AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+        const m=$('#oaMsg');if(m)m.innerHTML='❌ 连接服务失败'+(s.detail?`(${esc(s.detail)})`:'');
+        toast('❌ 连接服务失败,验证已中止');
+        return;
+      }
+      fails=0;
+      const m=$('#oaMsg');
+      if(s.manualUrl)showManualUrl(s.manualUrl);      // manualUrl 非空就显示(含 failed)
+      if(s.codeTask)CODETASK=s.codeTask;
+      if(s.state==='waiting_code'){                   // 仅此态插 6 位码框
+        if(m)m.textContent=s.hint||s.message||'需要输入 6 位验证码';
+        insertCodeBox(s.hint||'');
+        setTimeout(tick,3000);
+      }else if(s.state==='waiting_manual'){
+        if(m)m.textContent=s.message||s.hint||'请在浏览器窗口完成登录';
+        setTimeout(tick,3000);
+      }else if(s.state==='running'){
+        if(m)m.textContent=s.message||'验证中…';
+        setTimeout(tick,3000);
+      }else{
+        AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+        const ok=s.state==='ok';
+        const why=s.message||s.detail||'';            // 失败原因可能在 detail
+        if(m)m.innerHTML=(ok?'✅ ':'❌ ')+esc(why||s.state);
+        toast((ok?'✅ 验证通过,以后绑定站点直接复用':'❌ 验证失败: '+(why||'')));
+        if(ok)setTimeout(()=>{closeSheet();refresh();},1500);
+      }
+    }catch(e){                                        // 兜底:任何意外异常都复位,不静默卡死
+      AUTHBUSY=false;CURTASK=null;CODETASK=null;busy(false);
+      const m=$('#oaMsg');if(m)m.textContent='❌ 验证流程异常,已中止: '+((e&&e.message)||e);
+      toast('❌ 验证流程异常,已中止');
     }};
   tick();
 }
@@ -608,6 +682,7 @@ function credListSheet(){
   <div id="credListBody">加载中…</div>
   <button class="btn b w100" onclick="credFormSheet()">＋ 录入新账号凭据</button>`);
   api('/credentials').then(c=>{
+    if(!c.ok){const b=$('#credListBody');if(b)b.textContent='加载失败: '+(c.detail||'');return;}
     window.__creds=c.credentials||[];
     $('#credListBody').innerHTML=(c.credentials||[]).map(x=>{
       const vt={ok:'<span class="pill g">✅ 已验证</span>',stale:'<span class="pill o">验证过期</span>',
@@ -629,11 +704,11 @@ async function verifyCredById(cid){
   if(!t.task){toast(t.detail||'发起失败');return;}
   pollVerify(t.task,'Chrome 已弹出:账密已自动填充,2FA/邮箱码请在下面填入');
 }
-async function delCred(id){confirmDlg('删除凭据','确认删除该凭据?已绑定它的站点账号将失去自动填充,但登录态仍在。',async()=>{await api('/credentials/'+id,{method:'DELETE'});toast('已删除');credListSheet();});}
+async function delCred(id){confirmDlg('删除凭据','确认删除该凭据?已绑定它的站点账号将失去自动填充,但登录态仍在。',async()=>{const r=await api('/credentials/'+id,{method:'DELETE'});if(!r.ok){toast(r.detail||'删除失败');return;}toast('已删除');credListSheet();});}
 /* 兼容旧:直接输 GitHub 名建账号(无凭据时兜底) */
 async function saveAcc(siteKey){const k=siteKey||$('#aa_site').value;
   const r=await post('/accounts/save',{siteKey:k,alias:$('#aa_alias').value.trim(),githubAccount:$('#aa_gh').value.trim()||undefined});
-  toast(r.ok?'已保存':'失败');if(r.ok){closeSheet();refresh();}}
+  toast(r.ok?'已保存':(r.detail||'保存失败'));if(r.ok){closeSheet();refresh();}}
 function addSiteSheet(){openSheet('添加站点',`<div class="fld"><label>名称</label><input id="s_name"></div>
   <div class="fld"><label>API 地址</label><input id="s_url" placeholder="https://…"></div>
   <div class="fld"><label>形态</label><select id="s_type"><option value="newapi">newapi(有签到接口,全自动)</option><option value="login">login(登录即发额度,每日重登)</option></select></div>
@@ -643,15 +718,15 @@ function editSiteSheet(k){const s=siteOf(k);if(!s)return;openSheet('编辑站点
   <div class="fld"><label>形态</label><select id="s_type"><option value="newapi" ${s.checkinType==='newapi'?'selected':''}>newapi</option><option value="login" ${s.checkinType==='login'?'selected':''}>login</option></select></div>
   <button class="btn b w100" onclick="saveSite('${k}')">保存</button>`);}
 async function saveSite(k){const b={name:$('#s_name').value,baseUrl:$('#s_url').value,checkinType:$('#s_type').value};if(k)b.key=k;
-  const r=await post('/sites/save',b);toast(r.ok?'已保存':(r.detail||r.error));if(r.ok){closeSheet();refresh();}}
+  const r=await post('/sites/save',b);toast(r.ok?'已保存':(r.detail||r.error||'保存失败'));if(r.ok){closeSheet();refresh();}}
 function schedSheet(){openSheet('定时调度',`<div class="fld"><label><input type="checkbox" id="sch_on" style="width:auto" ${CFG?.schedule?.enabled?'checked':''}> 启用每日自动签到</label></div>
   <div class="fld"><label>时刻(Asia/Shanghai,届时自动跑全部账号)</label><input id="sch_time" type="time" value="${CFG?.schedule?.time||'09:05'}"></div>
   <button class="btn b w100" onclick="saveSched()">保存(即时生效)</button>`);}
-async function saveSched(){const r=await post('/settings/save',{schedule:{enabled:$('#sch_on').checked,time:$('#sch_time').value}});toast(r.ok?'调度已保存':'失败');if(r.ok){closeSheet();refresh();}}
+async function saveSched(){const r=await post('/settings/save',{schedule:{enabled:$('#sch_on').checked,time:$('#sch_time').value}});toast(r.ok?'调度已保存':(r.detail||'保存失败'));if(r.ok){closeSheet();refresh();}}
 function proxySheet(){openSheet('SOCKS5 代理',`<div class="fld"><label><input type="checkbox" id="px_on" style="width:auto" ${CFG?.proxy?.enabled?'checked':''}> 启用代理</label></div>
   <div class="fld row"><div><label>主机</label><input id="px_h" value="${CFG?.proxy?.host||'127.0.0.1'}"></div><div><label>端口</label><input id="px_p" type="number" value="${CFG?.proxy?.port||10808}"></div></div>
   <button class="btn b w100" onclick="savePx()">保存</button>`);}
-async function savePx(){await post('/settings/save',{proxy:{enabled:$('#px_on').checked,host:$('#px_h').value,port:+$('#px_p').value}});toast('代理已保存');if(CFG)refresh();closeSheet();}
+async function savePx(){const r=await post('/settings/save',{proxy:{enabled:$('#px_on').checked,host:$('#px_h').value,port:+$('#px_p').value}});if(!r.ok){toast(r.detail||'保存失败');return;}toast('代理已保存');if(CFG)refresh();closeSheet();}
 function authDoc(){openSheet('授权方式说明',`<div class="hint">· <b>全自动授权</b>:GitHub 密码/TOTP 存加密凭据库,headless 一键完成;签到/续期全自动。</div>
   <div class="hint" style="margin-top:10px">· <b>手动登录授权</b>:弹可见浏览器自己登录(适合不愿交密码/2FA 的场景),只存登录会话。</div>
   <div class="hint" style="margin-top:10px">· <b>额度</b>:走站点官方接口(§3.0 契约),不解析页面;打开页面自动取一次,其余靠「刷新」按钮,10 分钟缓存。</div>`);}
@@ -685,7 +760,7 @@ function openAsset(){const sites=(CFG?.sites||[]).filter(s=>(s.accounts||[]).len
     return `<div class="menu-item"><span style="font-weight:700;color:var(--blue)">${esc(s.name)}</span><div class="sp"></div><span class="hint">$${USD(t)} (${n} 号已取)</span></div>`}).join('')||'暂无数据,先点「刷新」');}
 /* 弹层 */
 function openSheet(t,h){$('#sheetTitle').textContent=t;$('#sheetBody').innerHTML=h;$('#overlay').classList.add('on')}
-function closeSheet(){$('#overlay').classList.remove('on')}
+function closeSheet(){$('#overlay').classList.remove('on');if(liveES){try{liveES.close();}catch(_){}liveES=null;}}   // 关闭实时日志 SSE,防连接泄漏
 $('#overlay').onclick=e=>{if(e.target.id==='overlay')closeSheet()};
 let dlgCb=()=>{};
 function confirmDlg(t,m,cb){$('#dlgT').textContent=t;$('#dlgM').textContent=m;dlgCb=cb;$('#dlg').classList.add('on')}

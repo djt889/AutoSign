@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -311,6 +312,67 @@ def test_credentials_roundtrip(monkeypatch, tmp_path):
     # 删除凭据
     assert cr.delete_credential(r1["id"]) is True
     assert cr.delete_credential(r1["id"]) is False
+
+
+# ---------- B-4 全自动链路透传 credential ----------
+
+def test_ensure_token_auto_loads_credential(monkeypatch, tmp_path):
+    """B-4:ensure_token 未传 credential 时按账号 key 自取凭据——
+    有凭据 ⇒ exchange 收到明文凭据(否则 GitHub 登录墙过不去)。"""
+    config, db, crypto = _patch(monkeypatch, tmp_path)
+    cfg = make_account_cfg(tmp_path)
+    config.save(cfg)
+    site, acc = cfg["sites"][0], cfg["sites"][0]["accounts"][0]
+    acc["token"] = _jwt(time.time() + 10)      # JWT 将过期 ⇒ 触发 exchange
+
+    from pc.engine import credentials as cr
+    r = cr.upsert_credential(github_user="u1", password="pw1")
+    cfg2 = config.load()
+    _, a2 = config.find_account(cfg2, "a1")
+    a2["credentialId"] = r["id"]
+    config.save(cfg2)
+
+    captured: dict = {}
+    def fake_exchange(site_, account_, cfg_, credential=None, force=False, **k):
+        captured["credential"] = credential
+        return AuthResult("ok", "", token="fresh-tok")
+    monkeypatch.setattr(sa, "exchange", fake_exchange)
+
+    token = sa.ensure_token(site, acc, cfg)
+    assert captured["credential"] == {"username": "u1", "password": "pw1",
+                                      "totpSecret": ""}
+    assert token == "fresh-tok"
+
+
+def test_ensure_token_credential_none_when_missing(monkeypatch, tmp_path):
+    """B-4:账号无凭据(伪 key/断链)⇒ 照旧传 None,行为不变。"""
+    config, db, crypto = _patch(monkeypatch, tmp_path)
+    cfg = make_account_cfg(tmp_path)
+    config.save(cfg)
+    site = cfg["sites"][0]
+    ghost = {"key": "ghost", "alias": "无凭据", "token": _jwt(time.time() + 10)}
+
+    captured: dict = {}
+    def fake_exchange(site_, account_, cfg_, credential=None, force=False, **k):
+        captured["credential"] = credential
+        return AuthResult("failed", "stop")
+    monkeypatch.setattr(sa, "exchange", fake_exchange)
+
+    sa.ensure_token(site, ghost, cfg)
+    assert captured["credential"] is None
+
+
+# ---------- B-11 凭据 ID 唯一性 ----------
+
+def test_credential_id_unique_and_format(monkeypatch, tmp_path):
+    """B-11:同毫秒快速连建多个凭据 ID 不碰撞(时间戳毫秒 → uuid 前 12 位)。"""
+    from pc.engine import credentials as cr
+    config, db, crypto = _patch(monkeypatch, tmp_path)
+    config.save(make_account_cfg(tmp_path))
+    ids = [cr.upsert_credential(github_user=f"u{i}@x.com")["id"] for i in range(20)]
+    assert len(set(ids)) == 20
+    for i in ids:
+        assert re.fullmatch(r"cred_[0-9a-f]{12}", i), i
 
 
 # ---------- state 双形态 ----------

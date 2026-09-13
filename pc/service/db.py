@@ -1,7 +1,8 @@
 """db.py — 日志/快照读写(JSON,兼容原 data/logs.json 格式)。
 
 原版格式:{time, site, account, event, detail} 数组,上限 10000 条。
-本模块追加 level 字段(info/err),其余字段名保持不变,旧文件可直接读。
+本模块追加 level 字段(info/err)与 seq 字段(进程内单调递增,SSE 增量基线,
+重启时从现有文件恢复基线避免 seq 回退),其余字段名保持不变,旧文件可直接读。
 """
 from __future__ import annotations
 
@@ -32,6 +33,19 @@ def load(name: str) -> Any:
         return None
 
 
+def _restore_seq() -> int:
+    """启动时从现有 logs.json 恢复 seq 基线(否则重启后 seq 从 1 重新计数,
+    会撞上旧条目的 seq,SSE 按 seq 增量续传就会漏推/错序)。"""
+    m = 0
+    for e in (load("logs.json") or []):
+        if isinstance(e, dict) and isinstance(e.get("seq"), int):
+            m = max(m, e["seq"])
+    return m
+
+
+_seq = _restore_seq()
+
+
 def save(name: str, data: Any) -> None:
     fp = _p(name)
     tmp = fp.with_suffix(fp.suffix + f".{os.getpid()}.tmp")
@@ -46,20 +60,29 @@ def append_log(
     detail: Any = None,
     level: str = "info",
 ) -> None:
-    entry = {
-        "time": datetime.now(timezone.utc).isoformat(),
-        "site": site,
-        "account": account,
-        "event": event,
-        "detail": detail,
-        "level": level,
-    }
+    global _seq
     with _lock:
+        _seq += 1
+        entry = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "site": site,
+            "account": account,
+            "event": event,
+            "detail": detail,
+            "level": level,
+            "seq": _seq,
+        }
         logs = load("logs.json") or []
         logs.append(entry)
         if len(logs) > MAX_LOGS:
             logs = logs[len(logs) - MAX_LOGS:]
         save("logs.json", logs)
+
+
+def max_seq() -> int:
+    """当前进程内日志 seq(单调递增);SSE 增量拉取的基线。"""
+    with _lock:
+        return _seq
 
 
 def recent_logs(limit: int = 300) -> list[dict]:

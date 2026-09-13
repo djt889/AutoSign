@@ -242,6 +242,13 @@ class SiteClient:
         # 未签(或查询失败)⇒ POST
         post = self.checkin_post()
         if post.status == 200 and isinstance(post.data, dict):
+            # B-2:HTTP 200 但 success=false 是站点业务失败,不是签到成功——
+            # 文案命中人机验证 ⇒ need_captcha 走两级自动处理;否则按失败透出
+            if post.data.get("success") is False:
+                msg = str(post.data.get("message") or "")
+                if NEED_CAPTCHA_RE.search(msg) or NEED_CAPTCHA_RE.search(post.raw or ""):
+                    return CheckinOutcome("need_captcha", message="签到被拦,需要人机验证")
+                return CheckinOutcome("failed", message=msg or "站点返回失败")
             d = post.data.get("data")
             awarded = None
             if isinstance(d, dict) and d.get("quota_awarded") is not None:

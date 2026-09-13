@@ -302,6 +302,53 @@ def test_checkin_post_401():
     assert "401" in out.message
 
 
+def test_checkin_post_200_success_false_captcha_message():
+    """B-2 回归:200 + success=false + 文案命中人机验证 ⇒ need_captcha(不是 done)。"""
+    import datetime as dt
+    month = dt.date.today().strftime("%Y-%m")
+    c = make_client({"token": "t"})
+    c, _ = bind(c, {
+        "/api/status": CallResult(ok=True, status=200, raw=_status_ok()),
+        f"month={month}": CallResult(ok=True, status=200, raw='{"data":{"stats":{},"records":[]}}'),
+        "/api/user/checkin": CallResult(ok=True, status=200,
+                                        raw='{"success":false,"message":"请完成人机验证后重试"}'),
+    })
+    out = c.checkin_flow()
+    assert out.state == "need_captcha"
+    assert "人机验证" in out.message
+
+
+def test_checkin_post_200_success_false_plain_failure():
+    """B-2 回归:200 + success=false 且无人机验证文案 ⇒ failed,message 透出站点文案。"""
+    import datetime as dt
+    month = dt.date.today().strftime("%Y-%m")
+    c = make_client({"token": "t"})
+    c, _ = bind(c, {
+        "/api/status": CallResult(ok=True, status=200, raw=_status_ok()),
+        f"month={month}": CallResult(ok=True, status=200, raw='{"data":{"stats":{},"records":[]}}'),
+        "/api/user/checkin": CallResult(ok=True, status=200,
+                                        raw='{"success":false,"message":"签到时间未到"}'),
+    })
+    out = c.checkin_flow()
+    assert out.state == "failed"
+    assert out.message == "签到时间未到"
+
+
+def test_checkin_post_200_success_false_no_message():
+    """B-2:200 + success=false 且无 message 字段 ⇒ failed 兜底文案。"""
+    import datetime as dt
+    month = dt.date.today().strftime("%Y-%m")
+    c = make_client({"token": "t"})
+    c, _ = bind(c, {
+        "/api/status": CallResult(ok=True, status=200, raw=_status_ok()),
+        f"month={month}": CallResult(ok=True, status=200, raw='{"data":{"stats":{},"records":[]}}'),
+        "/api/user/checkin": CallResult(ok=True, status=200, raw='{"success":false}'),
+    })
+    out = c.checkin_flow()
+    assert out.state == "failed"
+    assert out.message == "站点返回失败"
+
+
 # ---------- 5. 站点元信息 ----------
 
 def test_status_meta_fields():

@@ -1,6 +1,6 @@
 # pc/ — Python WebUI 服务端
 
-AutoSign 魔改版核心：FastAPI + Scrapling，替换上游的 `src/` Node 引擎与 `electron/` 桌面端。
+AutoSign 魔改版核心：FastAPI + Scrapling（替代上游已移除的 `src/` Node 引擎与 `electron/` 桌面端）。
 设计文档见 `docs/设计文档-justsign魔改.md`（接口契约是唯一真源）。
 
 ## 运行

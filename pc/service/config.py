@@ -98,25 +98,46 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _merge_valid(raw: dict) -> dict:
+    merged = _deep_merge(DEFAULTS, raw)
+    if not isinstance(merged.get("sites"), list):
+        merged["sites"] = []
+    return merged
+
+
+def _read_cfg() -> dict | None:
+    """读配置文件;读失败(JSONDecodeError/OSError)时先把原文件改名为
+    <config>.bad 保留现场(可人工恢复),再返回 None 由调用方回退默认值——
+    绝不静默把"瞬时读取失败"变成对原数据的覆盖。"""
+    if not CFG_PATH.exists():
+        return None
+    try:
+        return _merge_valid(json.loads(CFG_PATH.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError):
+        try:
+            os.replace(str(CFG_PATH), str(CFG_PATH) + ".bad")
+        except OSError:
+            pass        # 改名失败(文件被占用等)则原文件保留,下次读再试
+        return None
+
+
+def _atomic_write(cfg: dict[str, Any]) -> None:
+    """临时文件 + os.replace 原子落盘(与 db.save 同法):进程中断/并发写
+    不会留下半个 config.json。"""
+    tmp = Path(str(CFG_PATH) + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(CFG_PATH))
+
+
 def load() -> dict[str, Any]:
     with _lock:
-        if CFG_PATH.exists():
-            try:
-                raw = json.loads(CFG_PATH.read_text(encoding="utf-8"))
-                merged = _deep_merge(DEFAULTS, raw)
-                if not isinstance(merged.get("sites"), list):
-                    merged["sites"] = []
-                return merged
-            except (json.JSONDecodeError, OSError):
-                pass
-        return deepcopy(DEFAULTS)
+        cfg = _read_cfg()
+        return deepcopy(cfg) if cfg is not None else deepcopy(DEFAULTS)
 
 
 def save(cfg: dict[str, Any]) -> None:
     with _lock:
-        CFG_PATH.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _atomic_write(cfg)
 
 
 def update(mutator) -> dict[str, Any]:
@@ -125,22 +146,12 @@ def update(mutator) -> dict[str, Any]:
     并发签到/刷新/授权会各自 load→改→save,非原子时后写覆盖先写,
     实测并发新增 90 条只落盘 34 条(账号被吞 → 前端拿旧 key 报"账号不存在")。
     mutator(cfg) 就地修改 cfg;返回修改后的 cfg。
+    读失败时原文件保留为 <config>.bad,基于默认值继续(用户主动写操作)。
     """
     with _lock:
-        if CFG_PATH.exists():
-            try:
-                raw = json.loads(CFG_PATH.read_text(encoding="utf-8"))
-                cfg = _deep_merge(DEFAULTS, raw)
-            except (json.JSONDecodeError, OSError):
-                cfg = deepcopy(DEFAULTS)
-        else:
-            cfg = deepcopy(DEFAULTS)
-        if not isinstance(cfg.get("sites"), list):
-            cfg["sites"] = []
+        cfg = _read_cfg() or deepcopy(DEFAULTS)
         result = mutator(cfg)
-        CFG_PATH.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _atomic_write(cfg)
         return result if isinstance(result, dict) else cfg
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -405,7 +406,9 @@ def authorize(site: dict, account: dict, cfg: dict,
                 if "two-factor" in url or "verified-device" in url or "/device" in url:
                     if not filled["otp"]:
                         # ⑦ 同一页/同一码只提交一次:填过就置位跳过(防每 2s 重复 fill)
-                        code = _take_manual_code(task_id)   # 取一次即消费,不重复取
+                        # B-25:先 peek 判断有码才尝试填写,_fill_totp 成功后才
+                        # 消费——避免"填错一次码被消费、二次注入丢失"
+                        code = _peek_manual_code(task_id)
                         auto = "" if ("verified-device" in url or "/device" in url) \
                             else _totp_code(credential)
                         if not code and not auto:
@@ -415,6 +418,7 @@ def authorize(site: dict, account: dict, cfg: dict,
                                      "hint": _waiting_code_hint(url)})
                         elif _fill_totp(page, credential, code=code):
                             filled["otp"] = True
+                            _take_manual_code(task_id)   # 填写成功才消费(peek 不消耗)
                 elif "login" in url or "/session" in url:
                     if not filled["login"] and _fill_login(page, credential):
                         filled["login"] = True
@@ -424,12 +428,15 @@ def authorize(site: dict, account: dict, cfg: dict,
                                         or "/device" in url):
                 # 有头模式:用户手机/邮箱上的码通过 API 发来(task_id 隔离),直接注入
                 # ⑧ 按本任务 task_id 取码(不再用全局 _manual_code)
-                code = _take_manual_code(task_id)
-                if not filled["otp"] and code:
-                    if _fill_totp(page, credential or {}, code=code):
-                        filled["otp"] = True
-                    page.wait_for_timeout(2000)
-                    continue
+                # B-25:peek 判断有码才尝试填写,填写成功才消费(防错码被吃后二次注入丢失)
+                if not filled["otp"]:
+                    code = _peek_manual_code(task_id)
+                    if code:
+                        if _fill_totp(page, credential or {}, code=code):
+                            filled["otp"] = True
+                            _take_manual_code(task_id)   # 填写成功才消费
+                        page.wait_for_timeout(2000)
+                        continue
             if on_wall and not headful:
                 # 无凭据(或未提供)⇒ 转人工
                 holder["github_ok"] = False
@@ -455,7 +462,13 @@ def authorize(site: dict, account: dict, cfg: dict,
         db.append_log(sk, ak, "oauth", {"step": "manual-chrome", "ok": ok, "msg": msg[:80]})
         if not ok:
             return AuthResult("failed", msg)
-        kwargs["cdp_url"] = manual_cdp_url()
+        # B-10:CDP 地址拿不到 ⇒ 明确失败,不再把可能无效的伪造 URL 传下去
+        cdp_ok, cdp = manual_cdp_url()
+        if not cdp_ok:
+            db.append_log(sk, ak, "oauth",
+                          {"step": "manual-cdp", "ok": False, "msg": cdp[:80]}, "err")
+            return AuthResult("failed", cdp)
+        kwargs["cdp_url"] = cdp
         kwargs.pop("user_data_dir", None)  # CDP 接管时 profile 由 Chrome 进程侧管理
     else:
         kwargs["headless"] = True
@@ -805,13 +818,27 @@ def ensure_manual_chrome() -> tuple[bool, str]:
                 return True, "已连接已有 Chrome 调试会话"
     except Exception:
         pass
-    candidates = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
+    # B-10:跨平台探测(win32 保留原有两个安装路径;darwin 用 App 包内可执行文件;
+    # linux 走 PATH 依次找常见包名)。找不到时把已尝试路径全部列出,便于排障。
+    import shutil
+    if sys.platform == "darwin":
+        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    elif sys.platform.startswith("linux"):
+        linux_names = ("google-chrome", "google-chrome-stable",
+                       "chromium", "chromium-browser")
+        candidates = [c for c in (shutil.which(n) for n in linux_names) if c]
+        if not candidates:
+            return False, ("未找到 Chrome/Chromium(已尝试命令: "
+                           + ", ".join(linux_names) + "),请先安装")
+    else:                     # win32(及未知平台回退 Windows 常见路径)
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
     exe = next((c for c in candidates if os.path.exists(c)), None)
     if not exe:
-        return False, "未找到 Chrome,请先安装 Google Chrome"
+        return False, ("未找到 Chrome(已尝试路径: " + "; ".join(candidates)
+                       + "),请先安装 Google Chrome")
     try:
         subprocess.Popen(
             [exe, f"--remote-debugging-port={MANUAL_CDP_PORT}",
@@ -836,8 +863,12 @@ def ensure_manual_chrome() -> tuple[bool, str]:
     return False, "Chrome 调试端口无响应,请检查 Chrome 是否被拦截"
 
 
-def manual_cdp_url() -> str:
-    """返回 ws:// 调试地址(scrapling 的 cdp_url 只接受 ws/wss scheme)。"""
+def manual_cdp_url() -> tuple[bool, str]:
+    """返回 (ok, ws:// 调试地址)(scrapling 的 cdp_url 只接受 ws/wss scheme)。
+
+    B-10:拿不到 webSocketDebuggerUrl 时不再伪造可能无效的 URL——
+    返回失败 + 明确报错,由调用方终止本次授权。
+    """
     import json as _json
     import urllib.request
     try:
@@ -846,7 +877,8 @@ def manual_cdp_url() -> str:
             info = _json.loads(r.read().decode("utf-8", "replace"))
             ws = info.get("webSocketDebuggerUrl") or ""
             if ws.startswith("ws"):
-                return ws
-    except Exception:
-        pass
-    return f"ws://127.0.0.1:{MANUAL_CDP_PORT}"
+                return True, ws
+    except Exception as e:
+        return False, f"Chrome 调试端口({MANUAL_CDP_PORT})不可用: {e}"
+    return False, (f"Chrome 调试端口({MANUAL_CDP_PORT})未返回 webSocketDebuggerUrl,"
+                   "无法接管浏览器")

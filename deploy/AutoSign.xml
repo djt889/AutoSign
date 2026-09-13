@@ -1,7 +1,7 @@
-<?xml version="1.0" encoding="UTF-16"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>AutoSign auto check-in server on port 7300 (persistent, restart on failure)</Description>
+    <Description>AutoSign WebUI auto check-in server on port 37421 (persistent via deploy run-server-bg.cmd)</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -35,9 +35,9 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\Python313\pythonw.exe</Command>
-      <Arguments>-m pc.main</Arguments>
-      <WorkingDirectory>E:\AI\OhMyZcode\justsign</WorkingDirectory>
+      <Command>E:\AI\OhMyZcode\justsign\deploy\run-server-bg.cmd</Command>
+      <Arguments></Arguments>
+      <WorkingDirectory>E:\AI\OhMyZcode\justsign\deploy</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>

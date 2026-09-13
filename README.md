@@ -134,7 +134,6 @@ android/                  安卓端（保留自上游）
 tools/                    构建与校验脚本
 docs/                     设计文档
 deploy/                   后台常驻部署脚本（Windows 计划任务）
-electron/ , src/          上游遗留的旧桌面端实现，已被 pc/ 取代，不再维护
 ```
 
 ## 开发与测试

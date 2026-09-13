@@ -11,6 +11,7 @@ config.json 顶层 credentials[] = { id, alias, githubUser, siteAccount,
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 from typing import Any
 
 from ..service import config as config_svc
@@ -107,7 +108,8 @@ def _upsert_in_cfg(cfg: dict, alias: str = "", github_user: str = "",
                        if (c.get("githubUser") or "").lower() == github_user.lower()), None)
         duplicated = target is not None
     if not target:
-        target = {"id": "cred_" + str(__import__("time").time() * 1000).split(".")[0]}
+        # B-11:时间戳毫秒级同毫秒碰撞过(实测),改用 uuid 前 12 位保证唯一
+        target = {"id": "cred_" + uuid4().hex[:12]}
         creds.append(target)
         created = True
 

@@ -202,11 +202,75 @@ def test_401_failed_message(tmp_path, monkeypatch):
 
 
 def test_account_cookies_parser():
-    assert ck._account_cookies("session=abc; uid=7") == [
-        {"name": "session", "value": "abc", "path": "/"},
-        {"name": "uid", "value": "7", "path": "/"},
+    """B-3:每个 cookie 必须带 domain(Playwright 要求 url 或 domain)。"""
+    host = "s1.example.com"
+    assert ck._account_cookies("session=abc; uid=7", host) == [
+        {"name": "session", "value": "abc", "path": "/", "domain": host},
+        {"name": "uid", "value": "7", "path": "/", "domain": host},
     ]
-    assert ck._account_cookies("") == []
+    assert ck._account_cookies("", host) == []
+
+
+def test_stealthy_cookies_carry_site_domain(tmp_path, monkeypatch):
+    """B-3 回归:_checkin_via_stealthy 调用点必须传站点 hostname(此前漏传
+    导致 Playwright cookie 无 url/domain 报错,cookie 型账号第二级全挂)。"""
+    site, acc, cfg = make()
+    acc["siteCookie"] = "session=zzz"
+    captured: dict = {}
+
+    def fake_fetch_cf_safe(url, kwargs):
+        captured["cookies"] = kwargs.get("cookies")
+        return None
+
+    monkeypatch.setattr(ck, "_fetch_cf_safe", fake_fetch_cf_safe)
+    ck._checkin_via_stealthy(site, acc, cfg, ck.SiteClient(site, acc, cfg))
+    assert captured["cookies"] == [
+        {"name": "session", "value": "zzz", "path": "/", "domain": "s1.example.com"}]
+
+
+def test_usd_in_text_strict():
+    """B-15:金额必须紧邻货币符号,裸数字不再误判。"""
+    assert ck._usd_in_text("第 3 天签到获得＄10") == 10.0     # 不是 3.0
+    assert ck._usd_in_text("获得额度 ＄20.642880 额度") == 20.64
+    assert ck._usd_in_text("奖励 $5") == 5.0
+    assert ck._usd_in_text("￥3.5 已到账") == 3.5
+    assert ck._usd_in_text("第 3 天签到") is None             # 裸数字不匹配
+    assert ck._usd_in_text("奖励 USD 2 到账") is None
+    assert ck._usd_in_text("无金额文案") is None
+
+
+def test_is_checkin_text_traditional():
+    """B-15:繁体「簽到」也识别为签到文案;排除项不放松。"""
+    assert ck._is_checkin_text("簽到獲得獎勵") is True
+    assert ck._is_checkin_text("签到获得奖励") is True
+    assert ck._is_checkin_text("每日checkin bonus") is True
+    assert ck._is_checkin_text("注册赠送") is False            # 排除项仍有效
+    assert ck._is_checkin_text("邀請獎勵") is False
+
+
+def test_l1_success_false_falls_to_l2(tmp_path, monkeypatch):
+    """B-2 回归:第一级 POST 返回 200 但 success=false 不得判 done——
+    落日志后继续第二级,由整页求解完成签到。"""
+    site, acc, cfg = make()
+    db = patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(ck.SiteClient, "checkin_flow",
+                        lambda self: CheckinOutcome("need_captcha", message="被拦"))
+    monkeypatch.setattr(ck.SiteClient, "status",
+                        lambda self: type("R", (), {"status": 200, "data": {"data": {"turnstile_site_key": "0xKEY"}}})())
+    monkeypatch.setattr(ck, "_fetch_turnstile_token_headless", lambda *a, **k: "tok123")
+    monkeypatch.setattr(ck.SiteClient, "checkin_post",
+                        lambda self, turnstile_token="": type("R", (), {
+                            "status": 200, "blocked_by_waf": False,
+                            "data": {"success": False, "message": "签到失败,请重试"}})())
+    monkeypatch.setattr(ck, "_checkin_via_stealthy",
+                        lambda *a, **k: '{"success":true,"data":{"quota_awarded":2500000}}')
+    monkeypatch.setattr(ck.SiteClient, "self_info",
+                        lambda self: type("R", (), {"status": 200, "blocked_by_waf": False, "data": {}})())
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "done"
+    assert rep.captcha_level == 2                              # 不是 1
+    assert any(l["event"] == "captcha-l1" and l.get("level") == "err"
+               and l["detail"].get("success") is False for l in db.recent_logs(10))
 
 
 def test_checkin_persist_lastCheckin(tmp_path, monkeypatch):
@@ -245,3 +309,80 @@ def test_status_cache_cleared_after_checkin():
     # 模拟 checkin 的清缓存逻辑(与 main.checkin 同实现)
     main._status_cache.pop("k1", None)
     assert "k1" not in main._status_cache
+
+
+def _fail_responses(monkeypatch):
+    """把 login 型前置判定用的站点接口全部 mock 成失败(already 判定走 False)。"""
+    monkeypatch.setattr(ck.SiteClient, "sys_log",
+                        lambda self, **k: type("R", (), {"status": 500, "blocked_by_waf": False,
+                                                         "data": {}})())
+    monkeypatch.setattr(ck.SiteClient, "self_info",
+                        lambda self: type("R", (), {"status": 401, "blocked_by_waf": False,
+                                                    "data": {}})())
+    monkeypatch.setattr(ck.SiteClient, "status",
+                        lambda self: type("R", (), {"status": 500, "data": {}})())
+
+
+def test_login_relogin_unseals_account(tmp_path, monkeypatch):
+    """B-17 回归:重登后 client.account 必须是明文(unseal 幂等)。
+
+    exchange 只更新了 token 时,account 里旧 siteCookie 仍是 enc: 密文;
+    直接 client.account = account 会把密文当 Cookie 头发出去(401)。
+    """
+    from pc.service import crypto
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    acc["siteCookie"] = crypto.encrypt("old-cookie")
+    acc["token"] = ""
+    _fail_responses(monkeypatch)
+
+    seen: dict = {}
+    def fake_self(self):
+        seen["account"] = dict(self.account)          # 记录 exchange 后的 client.account
+        return type("R", (), {"status": 401, "blocked_by_waf": False, "data": {}})()
+    monkeypatch.setattr(ck.SiteClient, "self_info", fake_self)
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("ok", "授权成功", token="new-tok"))
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "done"
+    assert seen["account"]["siteCookie"] == "old-cookie"   # 解密明文,不是 enc:*
+    assert seen["account"]["token"] == "new-tok"           # 新 token 原样(明文)
+
+
+def test_login_relogin_passes_credential(tmp_path, monkeypatch):
+    """B-4:login 重登透传凭据(有密码才能在 GitHub 登录墙自动填充)。
+
+    此前硬编码 credential=None,重登必然卡 2FA/登录墙 ⇒ 全自动链路断。
+    """
+    from pc.service import config as config_svc, crypto
+    from pc.engine import credentials as cr
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_svc, "CFG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    cfg["sites"] = [site]
+    site["accounts"] = [dict(acc)]
+    config_svc.save(cfg)
+    r = cr.upsert_credential(github_user="u@x.com", password="pw1")
+    cfg2 = config_svc.load()
+    _, a2 = config_svc.find_account(cfg2, "a1")
+    a2["credentialId"] = r["id"]
+    config_svc.save(cfg2)
+    _fail_responses(monkeypatch)
+
+    captured: dict = {}
+    def fake_exchange(site, account, cfg_, credential=None, force=False, **k):
+        captured["credential"] = credential
+        captured["force"] = force
+        return AuthResult("failed", "stop-here")
+    monkeypatch.setattr(ck, "exchange", fake_exchange)
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "failed"
+    assert captured["force"] is True
+    assert captured["credential"] == {"username": "u@x.com", "password": "pw1",
+                                      "totpSecret": ""}

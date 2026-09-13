@@ -3,7 +3,8 @@
 包含:health / 静态 WebUI / 站点与账号 CRUD / 额度状态(10 分钟缓存) /
 签到 / 凭据库与凭据验证 / OAuth 授权(无头+有头兜底) / 定时调度 / SSE 实时日志。
 
-启动:python -m pc.main   (默认 0.0.0.0:37421,可用 JUSTSIGN_PORT 覆盖)
+启动:python -m pc.main   (默认 127.0.0.1:37421,可用 JUSTSIGN_HOST/JUSTSIGN_PORT 覆盖;
+设 JUSTSIGN_HOST=0.0.0.0 才对外暴露——服务无鉴权,对外风险自负)
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -31,12 +33,13 @@ from .service.scheduler import run_all_once, scheduler_status, start_scheduler
 app = FastAPI(title="AutoSign", version="1.0.0")
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
-HOST = os.environ.get("JUSTSIGN_HOST", "0.0.0.0")
+HOST = os.environ.get("JUSTSIGN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("JUSTSIGN_PORT", "37421"))
 
 
 def _mask(token: str | None) -> str | None:
-    return (token[:8] + "…") if token else None
+    """只显示尾部 4 字符:避免明文前缀泄露(token 前缀往往是最有信息量的部分)。"""
+    return ("…" + token[-4:]) if token else None
 
 
 def _mask_site(s: dict) -> dict:
@@ -172,10 +175,17 @@ def settings_save(body: dict):
             }
         if isinstance(body.get("proxy"), dict):
             p = body["proxy"]
+            raw_port = p.get("port")           # 区分缺省(None→10808)与显式 0(非法)
+            try:
+                port = 10808 if raw_port is None else int(raw_port)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"proxy.port 非法:需要整数,收到 {raw_port!r}")
+            if not (1 <= port <= 65535):
+                raise HTTPException(400, f"proxy.port 超出范围(1-65535): {port}")
             cfg["proxy"] = {
                 "enabled": bool(p.get("enabled")), "type": "socks5",
                 "host": str(p.get("host") or "127.0.0.1"),
-                "port": int(p.get("port") or 10808),
+                "port": port,
             }
 
     cfg = config.update(_mut)
@@ -189,7 +199,10 @@ def settings_save(body: dict):
 def run_all():
     """立即对所有已授权账号串行跑一轮(手动触发,与 cron 同一入口)。"""
     def worker():
-        run_all_once(trigger="manual")
+        try:
+            run_all_once(trigger="manual")
+        except Exception as e:
+            db.append_log("*", "*", "run-all", {"error": str(e)[:200]}, "err")
     threading.Thread(target=worker, daemon=True, name="run-all").start()
     return {"ok": True, "message": "已触发(后台串行执行,看实时日志)"}
 
@@ -216,20 +229,32 @@ def seal_existing():
 
 @app.get("/api/events")
 async def events():
-    """SSE 实时日志流:订阅 db 追加,断线由前端 EventSource 自动重连。"""
+    """SSE 实时日志流:按 db.seq 增量推送(seq > last_seq 才推),断线由前端
+    EventSource 自动重连。首连回放最近 20 条,之后只推新条目——
+    旧实现按"条数差"增量,多客户端并发/日志截断时会同一条重复推或整段漏推。"""
     import asyncio
     from fastapi.responses import StreamingResponse
 
+    def _seq_of(l: dict) -> int:
+        try:
+            return int(l.get("seq") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def gen():
-        last_idx = 0
+        # 基线只取回放条目的最大 seq:不能用 max_seq() 兜底——它会把基线抬到
+        # 计数器当前值,吞掉"回放开始后、读取前"恰好落盘的日志(seq == 基线)
+        last_seq = 0
+        logs = db.recent_logs(20)              # 首连回放最近 20 条(最新在前)
+        for l in reversed(logs):
+            last_seq = max(last_seq, _seq_of(l))
+            yield f"data: {json.dumps(l, ensure_ascii=False)}\n\n"
         while True:
             logs = db.recent_logs(300)
-            if len(logs) > 0:
-                # recent_logs 最新在前;发送比上次多的部分
-                new = logs[:max(0, len(logs) - last_idx)] if last_idx else logs[:20]
-                for l in reversed(new):
-                    yield f"data: {json.dumps(l, ensure_ascii=False)}\n\n"
-                last_idx = len(logs)
+            fresh = [l for l in logs if _seq_of(l) > last_seq]
+            for l in reversed(fresh):          # 按时间正序推
+                last_seq = max(last_seq, _seq_of(l))
+                yield f"data: {json.dumps(l, ensure_ascii=False)}\n\n"
             await asyncio.sleep(2)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -251,15 +276,20 @@ def get_config():
 
 @app.get("/api/logs/{account_key}")
 def account_logs(account_key: str, category: str = "系统", limit: int = 50, page: int = 1):
-    """原版 WebUI 兼容:站点使用日志 + lastBonus(找「签到」记录)。"""
+    """原版 WebUI 兼容:站点使用日志 + lastBonus(找「签到」记录)。
+    category/page/limit 经 urlencode 传给站点(category 可能含中文/&等);
+    limit/page 钳制到 1-200,防异常值打爆站点接口。"""
     cfg = config.load()
     found = config.find_account(cfg, account_key)
     if not found:
         raise HTTPException(404, "账号不存在")
     site, acc = found
+    limit = max(1, min(int(limit), 200))
+    page = max(1, min(int(page), 200))
+    from urllib.parse import urlencode
     from .engine.silent_auth import call_with_auto_reauth
     r = call_with_auto_reauth(site, acc, cfg, "get",
-                              f"/api/log/self?category={category}&page={page}&limit={limit}")
+                              f"/api/log/self?{urlencode({'category': category, 'page': page, 'limit': limit})}")
     data = (r.data or {}).get("data") or {}
     items = data.get("list") or data.get("items") or (data if isinstance(data, list) else [])
 
@@ -363,7 +393,9 @@ def accounts_save(body: dict):
             raise HTTPException(400, "siteKey 无效")
         site.setdefault("accounts", [])
         cid = str(body.get("credentialId", "") or "")
-        key = body.get("key") or f"acc_{int(time.time() * 1000)}"
+        # uuid 后 8 位代替毫秒时间戳:并发建号同毫秒必撞(实测丢账号),
+        # 前端对 key 无格式假设
+        key = body.get("key") or f"acc_{uuid.uuid4().hex[:8]}"
         acc = next((a for a in site["accounts"] if a["key"] == key), None)
         if acc is None and cid:
             # 契约 9:同站点同凭据已存在 ⇒ 复用其 key(在事务内判,防并发重复建)
@@ -468,8 +500,13 @@ _oauth_tasks: dict[str, dict] = {}
 _verify_tasks: dict[str, dict] = {}
 _task_lock = threading.Lock()
 _task_ts: dict[str, float] = {}      # task_id → 写入时间(清理用,不出现在响应里)
+_task_account: dict[str, str] = {}   # task_id → accountKey(同账号授权去重用)
 _TASK_TTL_S = 3600                   # 任务状态保留 1 小时(契约 12)
 _TASK_MAX = 200                      # 最多保留 200 条(契约 12)
+
+# 活任务状态:清理(TTL/容量淘汰)不得删除,否则前端轮询会 404、
+# waiting_* 等人工输入的任务直接丢失
+_LIVE_STATES = ("running", "waiting_code", "waiting_manual")
 
 # AuthResult.state → 前端任务 state(契约 4:need_code/need_manual 分流)
 _AUTH_STATE_TO_TASK = {
@@ -480,19 +517,45 @@ _AUTH_STATE_TO_TASK = {
 }
 
 
+def _is_live_locked(task_id: str) -> bool:
+    """该 task_id 是否处于活任务状态(须持 _task_lock)。"""
+    t = _oauth_tasks.get(task_id) or _verify_tasks.get(task_id)
+    return bool(t) and t.get("state") in _LIVE_STATES
+
+
 def _cleanup_tasks_locked() -> None:
-    """清理任务状态(须持 _task_lock):先删超 1h 的,再按最旧淘汰到容量上限。"""
+    """清理任务状态(须持 _task_lock):先删超 1h 的,再按最旧淘汰到容量上限。
+    running/waiting_* 的活任务一律跳过(TTL 和容量淘汰都不得删活任务;
+    终态任务照常清理),因此清理后容量可能暂时略超 _TASK_MAX。"""
     now = time.time()
-    for k in [k for k, ts in _task_ts.items() if now - ts > _TASK_TTL_S]:
+    for k in [k for k, ts in _task_ts.items()
+              if now - ts > _TASK_TTL_S and not _is_live_locked(k)]:
         _task_ts.pop(k, None)
         _oauth_tasks.pop(k, None)
         _verify_tasks.pop(k, None)
-    if len(_task_ts) > _TASK_MAX:
-        oldest = sorted(_task_ts, key=lambda k: _task_ts[k])[: len(_task_ts) - _TASK_MAX]
-        for k in oldest:
+        _task_account.pop(k, None)
+    overflow = len(_task_ts) - _TASK_MAX
+    if overflow > 0:
+        for k in sorted(_task_ts, key=lambda k: _task_ts[k]):
+            if overflow <= 0:
+                break
+            if _is_live_locked(k):
+                continue
             _task_ts.pop(k, None)
             _oauth_tasks.pop(k, None)
             _verify_tasks.pop(k, None)
+            _task_account.pop(k, None)
+            overflow -= 1
+
+
+def _active_oauth_task(account_key: str) -> str:
+    """同账号是否已有进行中的授权任务(running/waiting_*),有则返回其 task_id。
+    用于防止重复发起导致并发双 Chrome(须持 _task_lock 调用)。"""
+    for tid, owner in _task_account.items():
+        if owner == account_key and tid in _oauth_tasks \
+                and _oauth_tasks[tid].get("state") in _LIVE_STATES:
+            return tid
+    return ""
 
 
 def _put_task(store: dict, task_id: str, payload: dict) -> None:
@@ -553,10 +616,21 @@ def oauth_start(body: dict):
     found = config.find_account(cfg, account_key)
     if not found:
         raise HTTPException(404, "账号不存在")
+
+    # 同账号去重:已有 running/waiting_* 的授权任务直接复用,不再起新线程
+    # (否则连点两次授权 = 并发双 Chrome 抢同一账号)
+    with _task_lock:
+        existing = _active_oauth_task(account_key)
+    if existing:
+        return {"ok": True, "task": existing, "reused": True,
+                "hint": "该账号已有进行中的授权任务,已复用(看原任务状态)"}
+
     site, acc = found
     clear_cooldown(account_key)               # 手动授权清冷却
 
-    task_id = f"oauth_{int(time.time() * 1000)}"
+    task_id = f"oauth_{uuid.uuid4().hex[:8]}"
+    with _task_lock:
+        _task_account[task_id] = account_key
 
     def worker():
         _put_task(_oauth_tasks, task_id,
@@ -579,7 +653,7 @@ def oauth_start(body: dict):
                        "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
 
     threading.Thread(target=worker, daemon=True, name=f"oauth-{account_key}").start()
-    return {"ok": True, "task": task_id}
+    return {"ok": True, "task": task_id, "reused": False}
 
 
 @app.post("/api/oauth/manual")
@@ -592,10 +666,20 @@ def oauth_manual(body: dict):
     found = config.find_account(cfg, account_key)
     if not found:
         raise HTTPException(404, "账号不存在")
+
+    # 同账号去重(B-12):headful 与 headless 共用 _oauth_tasks,防并发双 Chrome
+    with _task_lock:
+        existing = _active_oauth_task(account_key)
+    if existing:
+        return {"ok": True, "task": existing, "reused": True,
+                "hint": "该账号已有进行中的授权任务,已复用(看原任务状态)"}
+
     site, acc = found
     clear_cooldown(account_key)
 
-    task_id = f"oauth-h_{int(time.time() * 1000)}"
+    task_id = f"oauthh_{uuid.uuid4().hex[:8]}"
+    with _task_lock:
+        _task_account[task_id] = account_key
 
     def worker():
         _put_task(_oauth_tasks, task_id,
@@ -617,7 +701,7 @@ def oauth_manual(body: dict):
                        "hint": "", "codeTask": "", "manualUrl": "", "login": ""})
 
     threading.Thread(target=worker, daemon=True, name=f"oauth-h-{account_key}").start()
-    return {"ok": True, "task": task_id,
+    return {"ok": True, "task": task_id, "reused": False,
             "hint": "浏览器已弹出:账密已自动填充(如有),2FA/邮箱验证码请在授权弹层填入"}
 
 
@@ -701,7 +785,7 @@ def credentials_verify(body: dict):
     pseudo = {"key": probe_key,
               "alias": f"验证:{label}", "githubAccount": gh}
     credential = {"username": gh, "password": pw, "totpSecret": tp}
-    task_id = f"verify_{int(time.time() * 1000)}"
+    task_id = f"verify_{uuid.uuid4().hex[:8]}"
     start_msg = ("验证中:请在弹出的 Chrome 里完成登录/2FA/邮箱码" if headful
                  else "验证中:后台静默自验(账密自动填充,无需操作)")
 
@@ -800,6 +884,9 @@ def index():
 def main():
     import uvicorn
     print(f"justsign(py) → http://{HOST}:{PORT}  (docs: /docs)")
+    if HOST not in ("127.0.0.1", "localhost", "::1"):
+        print(f"[警告] 绑定地址 {HOST} 为非回环:服务已对外暴露且无鉴权,风险自负!"
+              f"(仅本机使用请勿设置 JUSTSIGN_HOST)")
     uvicorn.run(app, host=HOST, port=PORT)
 
 

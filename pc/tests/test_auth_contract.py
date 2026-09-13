@@ -177,6 +177,7 @@ def _patch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_oauth_tasks", {})
     monkeypatch.setattr(main, "_verify_tasks", {})
     monkeypatch.setattr(main, "_task_ts", {})
+    monkeypatch.setattr(main, "_task_account", {})
     return config, db, crypto
 
 

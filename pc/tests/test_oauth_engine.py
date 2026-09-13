@@ -167,7 +167,7 @@ def _bootstrap_authorize(monkeypatch, tmp_path, page, headful: bool = False):
     monkeypatch.setattr("scrapling.fetchers.StealthyFetcher.fetch", _SF.fetch)
     if headful:
         monkeypatch.setattr(of, "ensure_manual_chrome", lambda: (True, "ok"))
-        monkeypatch.setattr(of, "manual_cdp_url", lambda: "ws://127.0.0.1:19222")
+        monkeypatch.setattr(of, "manual_cdp_url", lambda: (True, "ws://127.0.0.1:19222"))
     return page
 
 
@@ -262,3 +262,153 @@ def test_headful_takes_code_by_task_id(monkeypatch, tmp_path):
     assert page.filled and page.filled[0][1] == "888888"   # 用的是本任务桶的码
     assert states == []
     assert r.state in ("failed", "need_manual")
+
+
+# ---------- B-25 peek/take 时序:fill 失败不消费,fill 成功才消费 ----------
+
+class _FailingOtpLocator(_Locator):
+    """otp 输入框 fill 必抛(模拟页面元素抖动/选择器失效);抛前记录尝试。"""
+
+    def fill(self, value):
+        self._page.filled.append((self._sel, value))
+        raise RuntimeError("stale element")
+
+
+class _OtpFailPage(_Page):
+    def locator(self, sel):
+        return _FailingOtpLocator(self, sel)
+
+
+def test_2fa_fill_fail_keeps_code(monkeypatch, tmp_path):
+    """B-25 回归:fill 失败时手动码不得被消费——旧实现先 take 再 fill,
+    一次填错就把码吃掉,用户二次注入后桶里已无码(码丢失)。"""
+    cfg, site, account = _cfg_site_account()
+    credential = {"username": "u1", "password": "pw", "totpSecret": ""}
+    page = _OtpFailPage("https://github.com/sessions/two-factor", present=["authenticator"])
+    _bootstrap_authorize(monkeypatch, tmp_path, page)
+
+    of.set_manual_code("654321", "tb")
+    states: list[dict] = []
+    r = of.authorize(site, account, cfg, credential, headful=False,
+                     task_id="tb", on_state=states.append)
+    assert _otp_fill_count(page) >= 1            # 确实尝试过填
+    assert of._peek_manual_code("tb") == "654321"   # 码仍在桶里,未被消费
+    # 有码 ⇒ 不通知 waiting_code(与 ⑥ 的无码路径区分)
+    assert states == []
+    assert r.state in ("failed", "need_manual")
+
+
+def test_2fa_code_consumed_after_successful_fill(monkeypatch, tmp_path):
+    """B-25:fill 成功后码才被消费(peek→fill→take 三步时序)。"""
+    cfg, site, account = _cfg_site_account()
+    credential = {"username": "u1", "password": "pw", "totpSecret": ""}
+    page = _Page("https://github.com/sessions/two-factor", present=["authenticator"])
+    _bootstrap_authorize(monkeypatch, tmp_path, page)
+
+    of.set_manual_code("654321", "tc")
+    states: list[dict] = []
+    of.authorize(site, account, cfg, credential, headful=False,
+                 task_id="tc", on_state=states.append)
+    assert _otp_fill_count(page) == 1
+    assert of._peek_manual_code("tc") == ""      # 成功后才消费,不会重复填
+
+
+def test_headful_fill_fail_keeps_code(monkeypatch, tmp_path):
+    """B-25:有头分支同样 fill 失败不消费(旧实现 take 在 filled 判定之前,更糟)。"""
+    cfg, site, account = _cfg_site_account()
+    credential = {"username": "u1", "password": "pw"}
+    page = _OtpFailPage("https://github.com/sessions/two-factor")
+    _bootstrap_authorize(monkeypatch, tmp_path, page, headful=True)
+
+    of.set_manual_code("777777", "th")
+    states: list[dict] = []
+    r = of.authorize(site, account, cfg, credential, headful=True,
+                     task_id="th", on_state=states.append)
+    assert _otp_fill_count(page) >= 1
+    assert of._peek_manual_code("th") == "777777"
+    assert r.state in ("failed", "need_manual")
+
+
+# ---------- B-10 跨平台 Chrome 探测 + CDP 地址失败语义 ----------
+
+def test_ensure_manual_chrome_darwin(monkeypatch):
+    """B-10:darwin 走 App 包内路径,找不到时报错列出已尝试路径。"""
+    def boom(url, timeout=0):
+        raise OSError("no cdp")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr(of.sys, "platform", "darwin")
+    ok, msg = of.ensure_manual_chrome()
+    assert ok is False
+    assert "/Applications/Google Chrome.app" in msg
+
+
+def test_ensure_manual_chrome_linux_which(monkeypatch):
+    """B-10:linux 用 shutil.which 依次找常见包名;全找不到时列出命令清单。"""
+    def boom(url, timeout=0):
+        raise OSError("no cdp")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr(of.sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda n: None)
+    ok, msg = of.ensure_manual_chrome()
+    assert ok is False
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        assert name in msg
+
+
+def test_ensure_manual_chrome_linux_found(monkeypatch):
+    """B-10:linux which 命中但文件不存在(极端)⇒ 报错列出该路径,不启动。"""
+    def boom(url, timeout=0):
+        raise OSError("no cdp")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr(of.sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/chromium" if n == "chromium" else None)
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+    ok, msg = of.ensure_manual_chrome()
+    assert ok is False and "/usr/bin/chromium" in msg
+
+
+def test_ensure_manual_chrome_win32_paths_listed(monkeypatch):
+    """B-10:win32 保留原有两个安装路径;都不存在时报错列出两个路径。"""
+    def boom(url, timeout=0):
+        raise OSError("no cdp")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr(of.sys, "platform", "win32")
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+    ok, msg = of.ensure_manual_chrome()
+    assert ok is False
+    assert r"C:\Program Files\Google\Chrome\Application\chrome.exe" in msg
+    assert r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" in msg
+
+
+def test_manual_cdp_url_failure_semantics(monkeypatch):
+    """B-10:拿不到 webSocketDebuggerUrl ⇒ (False, 明确报错),不再伪造 ws:// URL。"""
+    def boom(url, timeout=0):
+        raise OSError("connection refused")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    ok, msg = of.manual_cdp_url()
+    assert ok is False and "调试端口" in msg
+
+    class _R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{}'                       # 端口有响应但无 ws 字段
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _R())
+    ok2, msg2 = of.manual_cdp_url()
+    assert ok2 is False and "webSocketDebuggerUrl" in msg2
+
+
+def test_headful_authorize_aborts_when_cdp_unavailable(monkeypatch, tmp_path):
+    """B-10:有头授权拿不到 CDP 地址 ⇒ 直接 failed,不把无效 URL 传给 fetch。"""
+    cfg, site, account = _cfg_site_account()
+    page = _Page("https://github.com/login")
+    _bootstrap_authorize(monkeypatch, tmp_path, page, headful=True)
+    monkeypatch.setattr(of, "manual_cdp_url",
+                        lambda: (False, "Chrome 调试端口(19222)不可用: refused"))
+    r = of.authorize(site, account, cfg, None, headful=True)
+    assert r.state == "failed"
+    assert "调试端口" in r.message

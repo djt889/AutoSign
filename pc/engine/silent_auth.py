@@ -181,6 +181,15 @@ def ensure_token(site: dict, account: dict, cfg: dict,
         account["siteCookie"] = cookie
         return token
     if token or cookie:                       # 有任一凭据才尝试静默换新
+        # B-4:调用方未传凭据时按账号 key 自取(全自动链路里 ensure_token 常
+        # 被直接调用,不带 credential;有密码才能在 GitHub 登录墙自动填充)。
+        # 取不到(空 dict/伪 key)照旧传 None,行为不变。
+        if credential is None:
+            try:
+                from .credentials import get_credential
+                credential = get_credential(account.get("key")) or None
+            except Exception:
+                credential = None
         r = exchange(site, account, cfg, credential)
         if r.state == "ok" and r.token:
             account["token"] = r.token         # 就地更新,调用方立即受益

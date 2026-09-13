@@ -17,8 +17,10 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from ..service import db
+from ..service.secret_store import unseal_account
 from .silent_auth import exchange
 from .site_client import CallResult, SiteClient
 
@@ -141,7 +143,8 @@ def _checkin_via_stealthy(site: dict, account: dict, cfg: dict,
         page.wait_for_timeout(8000)
         holder["result"] = page.evaluate("window.__CHECKIN_RESULT__ || ''") or ""
 
-    cookies = _account_cookies((account.get("siteCookie") or "").strip())
+    cookies = _account_cookies((account.get("siteCookie") or "").strip(),
+                               urlparse(client.base_url).hostname or "")
     kwargs: dict[str, Any] = dict(
         headless=True,
         solve_cloudflare=True,
@@ -170,13 +173,18 @@ def _fetch_cf_safe(url: str, kwargs: dict[str, Any]) -> Any:
         return StealthyFetcher.fetch(url, **kwargs)
 
 
-def _account_cookies(cookie_header: str) -> list[dict]:
-    """'k1=v1; k2=v2' → Playwright cookies 列表(域名由目标站决定)。"""
+def _account_cookies(cookie_header: str, site_host: str) -> list[dict]:
+    """'k1=v1; k2=v2' → Playwright cookies 列表。
+
+    B-3:Playwright 的 cookie 必须带 url 或 domain(否则报错),此处统一补
+    domain=目标站 host;调用方传 urlparse(base_url).hostname。
+    """
     out = []
     for pair in cookie_header.split(";"):
         if "=" in pair:
             k, v = pair.split("=", 1)
-            out.append({"name": k.strip(), "value": v.strip(), "path": "/"})
+            out.append({"name": k.strip(), "value": v.strip(), "path": "/",
+                        "domain": site_host})
     return out
 
 
@@ -228,9 +236,9 @@ def _today_bonus(client: SiteClient) -> dict | None:
 
 
 def _is_checkin_text(text: str) -> bool:
-    """签到类文案;排除注册赠送/邀请赠送/兑换(与签到同为 type=4)。"""
+    """签到类文案(含繁体「簽到」);排除注册赠送/邀请赠送/兑换(与签到同为 type=4)。"""
     t = text.lower()
-    if not ("签到" in text or "check-in" in t or "checkin" in t):
+    if not ("签到" in text or "簽到" in text or "check-in" in t or "checkin" in t):
         return False
     return not ("注册" in text or "邀请" in text or "兑换" in text)
 
@@ -251,9 +259,13 @@ def _ts_is_today(ts_raw: str) -> bool:
 
 
 def _usd_in_text(text: str) -> float | None:
-    """从日志文案解析美元金额:「获得额度 ＄20.642880 额度」→ 20.64。"""
+    """从日志文案解析美元金额:「获得额度 ＄20.642880 额度」→ 20.64。
+
+    B-15:金额必须紧邻货币符号(＄/$/￥),不再匹配裸数字——
+    旧正则会把「第 3 天签到获得＄10」里的「3 天」误判成 3.0。
+    """
     import re
-    m = re.search(r"[\$￥＄美元]?\s*(\d+(?:\.\d+)?)\s*(?:额度|USD|美元)?", text)
+    m = re.search(r"[\$￥＄]\s*(\d+(?:\.\d+)?)", text)
     if not m:
         return None
     try:
@@ -295,18 +307,28 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
             return report
 
         # 2) 强制静默重放 OAuth(等价退出重登;自动绕过 8s 复用,但受 90s 失败冷却)
-        r = exchange(site, account, cfg, credential=None, force=True)
+        # B-4:透传凭据(有密码才能在 GitHub 登录墙自动填充),取不到留 None
+        credential = None
+        try:
+            from .credentials import get_credential
+            credential = get_credential(key) or None
+        except Exception:
+            credential = None
+        r = exchange(site, account, cfg, credential=credential, force=True)
         if r.state != "ok":
             report.message = f"重新登录失败: {r.message}"
             db.append_log(sk, key, "checkin", {"state": "failed", "relogin": r.message[:100]}, "err")
             return report
-        # 重放拿到新凭据,就地更新给 SiteClient 复用
-        if r.site_cookie:
-            account["siteCookie"] = r.site_cookie
-            client.account = account
-        if r.token:
-            account["token"] = r.token
-            client.account = account
+        # 重放拿到新凭据,就地更新给 SiteClient 复用。
+        # B-17:account 里原 token/siteCookie 可能还是 enc: 密文,直接
+        # client.account = account 会把密文当 Bearer/Cookie 发出去——
+        # unseal 幂等(明文原样返回),密文字段就地解密。
+        if r.site_cookie or r.token:
+            if r.site_cookie:
+                account["siteCookie"] = r.site_cookie
+            if r.token:
+                account["token"] = r.token
+            client.account = unseal_account(account)
 
         # 3) 刷新验证:优先今日奖励记录到账,回退 last_login_time;额度到位
         bonus = _today_bonus(client)
@@ -333,6 +355,23 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
 
     # 前置判定 + POST(契约 §3.0)
     outcome = client.checkin_flow()
+    # 401 ⇒ 静默换新一次再重试(B-4 闭环):凭据库有账密/TOTP 时全自动恢复,
+    # 不再让"JWT 过期"直接变成当日签到失败(需人工点重新授权)
+    if outcome.state == "failed" and "401" in (outcome.message or ""):
+        try:
+            from .credentials import get_credential
+            cred = get_credential(key) or None
+        except Exception:
+            cred = None
+        r = exchange(site, account, cfg, credential=cred)
+        db.append_log(sk, key, "checkin", {"step": "reauth-on-401", "ok": r.state == "ok"})
+        if r.state == "ok":
+            if r.site_cookie:
+                account["siteCookie"] = r.site_cookie
+            if r.token:
+                account["token"] = r.token
+            client.account = unseal_account(account)
+            outcome = client.checkin_flow()
     if outcome.state == "need_captcha":
         sitekey = _turnstile_sitekey(client)
         proxy = _proxy_url(cfg)
@@ -346,14 +385,20 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
                 db.append_log(sk, key, "captcha-l1", {"error": str(e)[:120]}, "err")
         if token:
             r1 = client.checkin_post(turnstile_token=token)
-            if r1.status == 200 and not r1.blocked_by_waf:
+            d1 = r1.data if isinstance(r1.data, dict) else {}
+            # B-2:HTTP 200 但 success=false 是站点业务失败,不判 done——
+            # 落日志后继续走第二级(整页求解),不再误报"签到成功"
+            if (r1.status == 200 and not r1.blocked_by_waf
+                    and d1.get("success") is not False):
                 report.state, report.captcha_level = "done", 1
                 report.message = "签到成功(Turnstile 挂件自动通过)"
                 report.awarded = _awarded_from(r1, client)
                 _finish(report, client, sk, key)
                 return report
             db.append_log(sk, key, "captcha-l1",
-                          {"http": r1.status, "waf": r1.blocked_by_waf}, "err")
+                          {"http": r1.status, "waf": r1.blocked_by_waf,
+                           "success": d1.get("success"),
+                           "msg": str(d1.get("message") or "")[:80]}, "err")
 
         # 第二级:StealthyFetcher 整页求解
         try:
