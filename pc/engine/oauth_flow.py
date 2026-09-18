@@ -327,6 +327,19 @@ def authorize(site: dict, account: dict, cfg: dict,
                 pass
         page.on("request", on_request)
 
+        # 关键:page_action 是在 fetch 完成首次导航**之后**才被调用的,此时
+        # framenavigated 事件已经发完。GitHub 会话有效时会一步直达站点回调
+        # (连 github.com 都不出现),若不在此处补记当前 URL,final_url 会永远为空,
+        # 最终误报"授权超时(最终落点 None)"——而页面明明已落在站点域、cookie 也已就绪。
+        try:
+            cur = page.url
+            if cur:
+                holder["final_url"] = cur
+                if cur not in holder["chain"]:
+                    holder["chain"].append(cur)
+        except Exception:
+            pass
+
         # 跨账号残留会话预清:profile 里若登录着**别的** GitHub 账号,GitHub 会
         # 无视 login= 参数直接用旧会话授权(实测:目标 DeanCastiel 却落到
         # github_494101)。判据用凭据里的 GitHub 登录名(credential.username,
@@ -487,12 +500,18 @@ def authorize(site: dict, account: dict, cfg: dict,
         resp = StealthyFetcher.fetch(auth_url, **kwargs)
 
     # 3b. capture_xhr 保险:回调页前端自己 GET /api/oauth/{provider}?code&state,
-    #     响应里就有凭据——URL 链漏抓时直接从这里拿
+    #     响应里就有凭据——URL 链漏抓时直接从这里拿。
+    #     若前端交换**失败**,把站点返回的错误码透传出来:这类失败此前一律被
+    #     吞成"未获取到授权码",用户无法排查(实测 JustDoWork 会回
+    #     AUTH_SESSION_LIMIT=该账号并发会话数超限,属站点侧限制,重试无用)。
+    exchange_err = None
     for xhr in (getattr(resp, "captured_xhr", None) or []):
         try:
             if "/api/oauth/" in (xhr.url or ""):
                 body = json.loads(xhr.body.decode("utf-8") if isinstance(xhr.body, bytes) else str(xhr.body))
-                if isinstance(body, dict) and body.get("success"):
+                if not isinstance(body, dict):
+                    continue
+                if body.get("success"):
                     creds = extract_credentials(body)
                     db.append_log(sk, ak, "oauth", {"step": "exchange-xhr",
                                                     "via": "capture_xhr"})
@@ -502,8 +521,16 @@ def authorize(site: dict, account: dict, cfg: dict,
                                             browser_cookies=holder["site_cookies"],
                                             trusted=cred_trusted,
                                             task_id=task_id)
+                else:
+                    exchange_err = {
+                        "code": str(body.get("code") or ""),
+                        "message": str(body.get("message") or ""),
+                    }
         except Exception:
             continue
+
+    if exchange_err:
+        db.append_log(sk, ak, "oauth", {"step": "exchange-rejected", **exchange_err}, "err")
 
     final_url = holder["final_url"]
     # 3. 落库判定(v1.4 实战定案,优先级):
@@ -519,7 +546,11 @@ def authorize(site: dict, account: dict, cfg: dict,
                  "github_id": "", "site_user_id": ""}
         probe_ok = False
         try:
-            probe = SiteClient(site, {**account, "siteCookie": holder["site_cookies"]}, cfg)
+            # 只带本次新拿到的 cookie 探测:账号里若存着**已过期的旧 token**,
+            # 站点会优先校验 Bearer 而直接 401,把有效 cookie 一起带下水
+            # (实测 JustDoWork:djt889 因旧 token 探测失败,同站无旧 token 的账号却成功)
+            probe = SiteClient(site, {**account, "siteCookie": holder["site_cookies"],
+                                      "token": ""}, cfg)
             sr = probe.call("get", "/api/user/self")
             if sr.status == 200 and isinstance(sr.data, dict):
                 d = sr.data.get("data") or {}
@@ -565,10 +596,25 @@ def authorize(site: dict, account: dict, cfg: dict,
         # 需到 GitHub Settings→Applications 撤销该应用后重试
         denied = "access_denied" in final_url
         db.append_log(sk, ak, "oauth", {"step": "callback", "verdict": "missing-code",
-                                        "denied": denied, "url": cb.safe}, "err")
-        msg = ("GitHub 拒绝了授权(error=access_denied):请到 GitHub → Settings → "
-               "Applications → Authorized OAuth Apps 撤销该应用后重试"
-               if denied else "未获取到授权码(可能授权被拒绝)")
+                                        "denied": denied, "url": cb.safe,
+                                        "exchangeErr": exchange_err}, "err")
+        if denied:
+            msg = ("GitHub 拒绝了授权(error=access_denied):请到 GitHub → Settings → "
+                   "Applications → Authorized OAuth Apps 撤销该应用后重试")
+        elif exchange_err:
+            # 站点前端已抢先交换且**失败**——把站点给的真实原因翻成人话,
+            # 否则用户只看到"未获取到授权码",无从排查
+            code = exchange_err.get("code") or ""
+            msg = {
+                "AUTH_SESSION_LIMIT":
+                    "站点拒绝:该账号同时登录的会话数已达上限(AUTH_SESSION_LIMIT)。"
+                    "请先登录站点 → 个人设置 → 会话管理,退出其他设备/多余会话后重试。",
+                "AUTH_UNAUTHORIZED":
+                    "站点拒绝:会话无效(AUTH_UNAUTHORIZED),请重试一次。",
+            }.get(code) or (f"站点拒绝了本次授权({code or exchange_err.get('message') or '未知原因'}),"
+                            "请稍后重试或在站点侧检查账号状态。")
+        else:
+            msg = "未获取到授权码(可能授权被拒绝)"
         return AuthResult("failed", msg, manual_url=auth_url)
     if not cb.should_exchange:
         if NEED_MANUAL_URL_RE.search(final_url):
