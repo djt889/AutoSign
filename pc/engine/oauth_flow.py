@@ -26,6 +26,7 @@ from urllib.parse import quote, urlparse, parse_qs
 
 from ..service import config as config_svc
 from ..service import db
+from ..service.secret_store import open_
 from .site_client import CallResult, SiteClient
 
 # GitHub 会话过期 ⇒ 需要人工(SilentAuth 契约:转人工 URL 清单)。
@@ -259,6 +260,30 @@ def authorize(site: dict, account: dict, cfg: dict,
     client = SiteClient(site, account, cfg)
     base = client.base_url
     site_host = urlparse(base).hostname or ""
+
+    # 0. 会话复用:现有凭据仍有效 ⇒ 直接复用,不再发新会话。
+    #    站点普遍限制单账号并发会话数(如 new-api 的 AUTH_SESSION_LIMIT),
+    #    每次都无脑走一遍 OAuth 会不断累加会话,最终把账号顶到上限而无法再授权。
+    #    只有确认失效(401/403)才继续走下面的新建流程。
+    if not headful:
+        try:
+            probe = client.call("get", "/api/user/self")
+            if probe.status == 200 and isinstance(probe.data, dict):
+                d = probe.data.get("data") or {}
+                cur_login = str(account.get("githubAccount") or "").strip()
+                db.append_log(sk, ak, "oauth", {"step": "reuse-existing-session",
+                                                "http": probe.status})
+                return AuthResult(
+                    "ok", "复用现有会话(凭据仍然有效,未新建站点会话)",
+                    token=open_(account.get("token")) if account.get("token") else "",
+                    site_cookie=open_(account.get("siteCookie")) if account.get("siteCookie") else "",
+                    site_user_id=str(d.get("id") or ""),
+                    github_login=d.get("username") or cur_login,
+                    github_id=str(d.get("github_user_id") or d.get("github_id") or ""),
+                    code_task=task_id,
+                )
+        except Exception:
+            pass
 
     # 1. flow_token + client_id
     flow_token, err = fetch_state(anon_client)
