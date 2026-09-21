@@ -316,7 +316,11 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
             credential = None
         r = exchange(site, account, cfg, credential=credential, force=True)
         if r.state != "ok":
+            report.state = "failed"
             report.message = f"重新登录失败: {r.message}"
+            # 失败必须落盘:否则前端仍显示上一次(甚至几天前)的「已签」,
+            # 用户以为今天领到了(实测 GoRouter 曾停留在 09-15 的旧状态)
+            _persist_checkin(sk, key, report)
             db.append_log(sk, key, "checkin", {"state": "failed", "relogin": r.message[:100]}, "err")
             return report
         # 重放拿到新凭据,就地更新给 SiteClient 复用。
@@ -333,9 +337,11 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
         # 3) 刷新验证:优先今日奖励记录到账,回退 last_login_time;额度到位
         bonus = _today_bonus(client)
         rewarded = bonus is not None or _login_rewarded_today(client)
-        # 重登本身已成功 ⇒ done;rewarded 只影响文案与日志(旧写成
-        # "done" if rewarded else "done" 的 dead ternary,易误读为条件生效)
-        report.state = "done"
+        # 关键:只有**确认到账**才算 done。重登动作成功但额度未到账时,
+        # 绝不能落盘 done——否则前端显示「今日已签」,用户以为领到了,
+        # 实际没有(实测该站存在重登成功但今日奖励记录未生成的情况)。
+        # 判据与上面的 already 分支保持一致:今日奖励记录 或 last_login_time。
+        report.state = "done" if rewarded else "failed"
         if bonus is not None:
             report.awarded = bonus.get("usd")
             report.message = ("重新登录完成,奖励已到账" if bonus.get("usd")
@@ -343,14 +349,16 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
         else:
             report.message = ("重新登录完成,额度发放已触发"
                               if rewarded else
-                              "重新登录完成(last_login_time 未更新,额度可能未发放,等下轮验证)")
+                              "重新登录已完成,但站点未确认今日额度到账"
+                              "(今日奖励记录与 last_login_time 均未更新);"
+                              "额度可能延迟,稍后可再点签到重试验证")
         report.quota = _quota(client)
         _persist_checkin(sk, key, report)
         db.append_log(sk, key, "checkin", {
-            "state": "done", "type": "login-relogin",
+            "state": report.state, "type": "login-relogin",
             "rewarded": rewarded, "bonusUSD": bonus.get("usd") if bonus else None,
             "availableUSD": report.quota.get("availableUSD"),
-        })
+        }, "info" if report.state == "done" else "err")
         return report
 
     # 前置判定 + POST(契约 §3.0)
@@ -424,6 +432,7 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
         report.captcha_level = -1
         report.message = ("人机验证两级自动处理均失败(挂件 + 整页求解),"
                           "本轮放弃;可更换代理节点后重试或等下轮调度")
+        _persist_checkin(sk, key, report)     # 失败落盘,前端才显示「今日未签」
         db.append_log(sk, key, "checkin", {"state": "failed", "captcha": -1}, "err")
         return report
 
@@ -446,7 +455,10 @@ def run_checkin(site: dict, account: dict, cfg: dict) -> CheckinReport:
     # skipped / failed
     report.state = outcome.state
     report.message = outcome.message
-    db.append_log(sk, key, "checkin", {"state": outcome.state}, 
+    # 失败/跳过也要落盘 lastCheckin:前端刷新后才知道"今日未签/失败",
+    # 否则界面只能靠内存快照,刷新即丢失、失败被显示成已签(实测用户反馈)
+    _persist_checkin(sk, key, report)
+    db.append_log(sk, key, "checkin", {"state": outcome.state, "message": (outcome.message or "")[:120]},
                   "info" if outcome.state == "skipped" else "err")
     return report
 
@@ -485,6 +497,8 @@ def _persist_checkin(site_key: str, account_key: str, report: CheckinReport) -> 
             "date": date,
             "state": report.state,
             "reward": report.awarded,
+            # 保留原因:前端据此提示"今日未签/失败原因",并允许重试
+            "message": (report.message or "")[:200],
         }
 
     config_svc.update(_mut)

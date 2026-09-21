@@ -347,7 +347,10 @@ def test_login_relogin_unseals_account(tmp_path, monkeypatch):
                         lambda *a, **k: AuthResult("ok", "授权成功", token="new-tok"))
 
     rep = ck.run_checkin(site, acc, cfg)
-    assert rep.state == "done"
+    # 本用例核心目的(B-17)是下面两条:重登后发给站点的 account 必须已解密。
+    # state 断言的是**新语义**:站点未确认今日额度到账(本用例 self_info 恒 401、
+    # 无今日奖励记录)时不允许报 done——否则界面谎报"今日已签"而实际没领到。
+    assert rep.state == "failed"
     assert seen["account"]["siteCookie"] == "old-cookie"   # 解密明文,不是 enc:*
     assert seen["account"]["token"] == "new-tok"           # 新 token 原样(明文)
 
@@ -386,3 +389,123 @@ def test_login_relogin_passes_credential(tmp_path, monkeypatch):
     assert captured["force"] is True
     assert captured["credential"] == {"username": "u@x.com", "password": "pw1",
                                       "totpSecret": ""}
+
+
+# ---------- 「不谎报已签」回归(用户实测反馈:界面显示已签、实际没领到) ----------
+
+def _mock_relogin_ok(monkeypatch):
+    """重登成功但站点侧额度未确认(与真实故障场景一致)。"""
+    from pc.engine.oauth_flow import AuthResult
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("ok", "授权成功", token="new-tok"))
+    # sys_log/self_info/status 全不可用 ⇒ 拿不到今日奖励记录与 last_login_time
+    _fail_responses(monkeypatch)
+
+
+def _today():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _Outcome(state, **kw):
+    from pc.engine.site_client import CheckinOutcome
+    return CheckinOutcome(state, **kw)
+
+
+def test_login_not_rewarded_must_not_report_done(tmp_path, monkeypatch):
+    """核心回归:重登完成但额度**未到账**时,绝不能报 done。
+
+    否则前端显示「今日已签」,用户以为领到了,实际没有(实测该站会出现
+    重登成功但今日奖励记录未生成的情况)。判据须与 already 分支一致。
+    """
+    from pc.service import crypto
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    acc["token"] = ""
+    acc["siteCookie"] = crypto.encrypt("ck")
+    _mock_relogin_ok(monkeypatch)
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state != "done", "额度未到账却报 done = 谎报已签"
+    assert rep.state == "failed"
+    assert "未确认" in rep.message or "未到账" in rep.message
+
+
+def test_login_rewarded_reports_done(tmp_path, monkeypatch):
+    """对照用例:站点确认今日奖励到账 ⇒ done(正常路径不被误伤)。"""
+    from pc.service import crypto
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    acc["token"] = ""
+    acc["siteCookie"] = crypto.encrypt("ck")
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("ok", "授权成功", token="new-tok"))
+    # 今日奖励记录可达 ⇒ 确认到账
+    monkeypatch.setattr(ck.SiteClient, "sys_log",
+                        lambda self, **k: type("R", (), {
+                            "status": 200, "blocked_by_waf": False,
+                            "data": {"data": {"list": [{"content": "每日签到奖励 $20",
+                                                        "created_at": _today()}]}}})())
+    monkeypatch.setattr(ck.SiteClient, "self_info",
+                        lambda self: type("R", (), {"status": 200, "blocked_by_waf": False,
+                                                    "data": {"data": {"quota": 10**7, "used_quota": 0}}})())
+    monkeypatch.setattr(ck.SiteClient, "status",
+                        lambda self: type("R", (), {"status": 200, "data": {"data": {}}})())
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state in ("done", "already")
+
+
+def test_failed_checkin_persists_state_for_frontend(tmp_path, monkeypatch):
+    """失败必须落盘 lastCheckin:否则前端刷新后无从得知未签,会显示成已签。"""
+    from pc.service import config as config_svc, crypto
+    site, acc, cfg = make()
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_svc, "CFG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    cfg["sites"] = [site]
+    site["accounts"] = [dict(acc)]
+    config_svc.save(cfg)
+    monkeypatch.setattr(ck.SiteClient, "checkin_flow",
+                        lambda self: _Outcome("failed", message="站点维护中"))
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "failed"
+    import json as _json
+    raw = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    lc = raw["sites"][0]["accounts"][0].get("lastCheckin") or {}
+    assert lc.get("state") == "failed", "失败状态未落盘,前端会误显示已签"
+    assert lc.get("message")
+
+
+def test_login_relogin_failure_persists(tmp_path, monkeypatch):
+    """重登失败必须落盘 failed:否则前端停留在上次(甚至几天前)的「已签」。
+
+    实测 GoRouter 曾因重登失败(站点 502)而 lastCheckin 停留在 09-15,
+    界面一直显示已签,与实际完全不符。
+    """
+    from pc.service import config as config_svc, crypto
+    from pc.engine.oauth_flow import AuthResult
+    site, acc, cfg = make("login")
+    patch_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_svc, "CFG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(crypto, "KEY_PATH", tmp_path / "secret.key")
+    # 预置一条陈旧的成功记录,模拟"几天前的已签"
+    site["accounts"] = [dict(acc)]
+    site["accounts"][0]["lastCheckin"] = {"date": "2020-01-01", "state": "done", "reward": 9.9}
+    cfg["sites"] = [site]
+    config_svc.save(cfg)
+    monkeypatch.setattr(ck, "exchange",
+                        lambda *a, **k: AuthResult("failed", "获取授权会话失败: state 获取失败(HTTP 502)"))
+
+    rep = ck.run_checkin(site, acc, cfg)
+    assert rep.state == "failed"
+    import json as _json
+    raw = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    lc = raw["sites"][0]["accounts"][0].get("lastCheckin") or {}
+    assert lc.get("state") == "failed", "重登失败未落盘,界面会停留在旧的成功状态"
+    assert lc.get("date") == _today()
+    assert "重新登录失败" in (lc.get("message") or "")

@@ -206,9 +206,11 @@ function checkedToday(a){
   return null;
 }
 function todayStr(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
-function markCheckedToday(k,state,reward){
-  try{localStorage.setItem('ck_'+k,JSON.stringify({d:todayStr(),state:state||'done',reward:reward??null}))}catch(_){}
+function markCheckedToday(k,state,reward,message){
+  try{localStorage.setItem('ck_'+k,JSON.stringify({d:todayStr(),state:state||'done',reward:reward??null,message:message||''}))}catch(_){}
 }
+/* 今日是否真的签到成功(仅 done/already 算已签;failed/skipped 必须继续提醒) */
+function isCheckedOk(ck){return !!ck&&(ck.state==='done'||ck.state==='already')}
 /* 额度状态内存(解决用户 bug1:重渲染不再清空已有额度;与 DOM 双写) */
 const QUOTA={};
 function setQuota(k,quota){
@@ -262,9 +264,17 @@ function updateSiteSums(){
 /* ===== 看板:站点卡 → 账号行(全端同一套) ===== */
 function rewardPill(a){return a.lastCheckin?.reward?`<span class="pill g">⚡ +$${USD(a.lastCheckin.reward)} 今日签到</span>`:''}
 function render(){
-  const sites=CFG?.sites||[],n=TKS.length,ok=TKS.filter(authed).length;
-  $('#summary').textContent=`${sites.length}站 ${n}号 · ${ok}已签 ${n-ok}待签`;
-  const ss=$('#side-summary'); if(ss)ss.textContent=`${sites.length}站 ${n}号 · ${ok}已签`;
+  const sites=CFG?.sites||[],n=TKS.length;
+  // 「已签」必须只统计**今日真的签到成功**的账号(此前误用"已授权"计数,
+  // 把 3 个失败的账号也算成已签,与实际完全不符)
+  const ok=TKS.filter(t=>authed(t)&&isCheckedOk(checkedToday(t))).length;
+  const fail=TKS.filter(t=>authed(t)&&checkedToday(t)&&!isCheckedOk(checkedToday(t))).length;
+  const un=TKS.filter(t=>authed(t)&&!checkedToday(t)).length;
+  const pend=TKS.length-ok;
+  $('#summary').textContent=`${sites.length}站 ${n}号 · ${ok}已签 ${pend}待签`
+    +(fail?`(含 ${fail} 失败)${un?` · ${un}未签`:''}`:'');
+  const ss=$('#side-summary'); if(ss)ss.textContent=`${sites.length}站 ${n}号 · ${ok}已签`
+    +(fail?` · ${fail}失败`:'');
   renderBoard();renderSettings();updateTotal();updateSiteSums();
 }
 function accRow(s,a){
@@ -272,15 +282,23 @@ function accRow(s,a){
   const lg=s.checkinType==='login';
   const ck=au?checkedToday(a):null;
   const am=a.authMode==='manual'?'manual':'auto';   // 按账号授权方式分流(auto→/oauth/start,manual→/oauth/manual)
+  // 状态必须如实反映真实结果:仅 done/already 才是「已签」;
+  // 失败/未知一律给出可重试的「签到」按钮,绝不把失败显示成已签。
+  // login 型「已授权 ≠ 已签」——它靠每日重新登录领额度,必须真的签过才算。
+  const done = ck && (ck.state==='done'||ck.state==='already');
+  const failedToday = ck && (ck.state==='failed'||ck.state==='need_captcha'||ck.state==='skipped');
   const act=!au?`<button class="btn r sm" onclick="startOAuth('${k}','${am}')">去授权</button>`
-    :ck?`<span class="pill g">✓ 已签</span>`
-    :lg?`<span class="pill g">✓ 已授权</span>`
+    :done?`<span class="pill g">✓ 已签</span>`
+    :failedToday?`<button class="btn b sm" onclick="doCheckin('${k}')">重试签到</button>`
     :`<button class="btn b sm" onclick="doCheckin('${k}')">签到</button>`;
   const rew=rewardPill(a);
+  const statePill = !au ? `<span class="pill o">待授权</span>`
+    : failedToday ? `<span class="pill r" title="${esc(ck.message||'今日签到未成功')}">今日未签</span>`
+    : '';
   return `<div class="acc-box">
     <div class="acc-r1"><div class="acc-ident">${esc(a.alias||k)}${gh?`<span class="gh">${esc(gh)}</span>`:''}
       <span class="acc-log" onclick="openLogs('${k}')">日志 ›</span></div>
-      <div class="ops">${au?'':`<span class="pill o">待授权</span>`}${act}
+      <div class="ops">${statePill}${act}
         <span style="color:var(--sub2);cursor:pointer;font-weight:900;padding:2px 6px" onclick="accMenu('${k}')">⋯</span></div></div>
     <div class="acc-r2"><span class="bl">可用余额</span><span class="bal" data-q="${k}">-</span>${rew}</div>
     <div class="acc-r3"><span data-tu="${k}">今日消耗 -</span><span style="margin:0 10px" data-uu="${k}">累计已用 -</span>
@@ -347,17 +365,18 @@ async function doCheckin(k){
   const t=TKS.find(x=>x.key===k);
   if(checking.has(k)){toast('该账号正在签到中…');return;}
   const ck=t?checkedToday(t):null;
-  if(ck&&ck.state!=='todo'){toast('今日已签到,无需重复操作');return;}
+  // 只有今日**确实签成功**才拦;失败/未签都应允许手动重试
+  if(isCheckedOk(ck)){toast('今日已签到,无需重复操作');return;}
   checking.add(k);
   busy(true,'签到中(两级人机验证全自动)…');
   try{
     const r=await post('/checkin/'+k);
     toast(r.message||r.detail||'操作失败');
-    if(r.ok&&(r.state==='done'||r.state==='already')){
-      markCheckedToday(k,r.state,r.awarded);
-      const tt=TKS.find(x=>x.key===k);
-      if(tt)tt.lastCheckin={date:todayStr(),state:r.state,reward:r.awarded};
-    }
+    const st=r&&r.state;
+    // 成败都落当日快照:失败要保留原因,界面才会提示可重试
+    markCheckedToday(k,st||'failed',r&&r.awarded,r&&r.message);
+    const tt=TKS.find(x=>x.key===k);
+    if(tt)tt.lastCheckin={date:todayStr(),state:st||'failed',reward:r&&r.awarded,message:r&&r.message};
     // 用签到返回的 quota 直接更新额度(不依赖 status 缓存,额度不消失)
     if(r.quota&&(r.quota.availableUSD!=null))setQuota(k,r.quota);
     render();
@@ -368,7 +387,8 @@ async function doCheckin(k){
   }finally{checking.delete(k);busy(false);}
 }
 async function bulkCheckin(){
-  const ts=TKS.filter(authed).filter(t=>{const c=checkedToday(t);return !c;});
+  // 只跳过「今日确实签成功」的账号:失败的必须重试,否则一次失败就整天不再尝试
+  const ts=TKS.filter(authed).filter(t=>!isCheckedOk(checkedToday(t)));
   if(!ts.length){toast('没有待签到的已授权账号(均已签)');return;}
   busy(true,`一键签到 ${ts.length} 个…`);
   // 并发跑(每账号 1 个请求,后端自带串行锁;失败不阻断)
@@ -376,13 +396,19 @@ async function bulkCheckin(){
     .catch(e=>({k:t.key,r:{ok:false,message:String(e)}}))));
   let n=0;
   for(const{k,r}of rs){
-    if(r.ok&&(r.state==='done'||r.state==='already')){
-      n++;markCheckedToday(k,r.state,r.awarded);
-      const tt=TKS.find(x=>x.key===k);if(tt)tt.lastCheckin={date:todayStr(),state:r.state,reward:r.awarded};
-      if(r.quota&&r.quota.availableUSD!=null)setQuota(k,r.quota);
+    const st=r&&r.state;
+    if(r.ok&&(st==='done'||st==='already')){
+      n++;
     }
+    // 成败都记录当日快照:失败也要留着,界面才会显示「今日未签/重试」
+    markCheckedToday(k,st||'failed',r&&r.awarded,r&&r.message);
+    const tt=TKS.find(x=>x.key===k);
+    if(tt)tt.lastCheckin={date:todayStr(),state:st||'failed',reward:r&&r.awarded,message:r&&r.message};
+    if(r.ok&&r.quota&&r.quota.availableUSD!=null)setQuota(k,r.quota);
   }
-  busy(false);toast(`一键签到完成 ${n}/${ts.length} 成功`);
+  busy(false);
+  const bad=ts.length-n;
+  toast(bad?`⚠️ 一键签到 ${n}/${ts.length} 成功,${bad} 个失败(可点账号上的「重试签到」)`:`✅ 一键签到完成 ${n}/${ts.length} 成功`);
   render();
   // 已签/刚签的账号强制刷一次额度(绕缓存,后端签到已清缓存)
   for(const{k,r}of rs)if(r.ok)await loadStatus(k,true);
