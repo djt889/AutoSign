@@ -518,11 +518,22 @@ def authorize(site: dict, account: dict, cfg: dict,
     except Exception as e:
         # scrapling 实测:页面无 CF 挑战时 solve_cloudflare 抛
         # 'No Cloudflare challenge found' —— 降级重试(去掉求解参数)
-        if "cloudflare" not in str(e).lower():
-            raise
-        kwargs.pop("solve_cloudflare", None)
-        db.append_log(sk, ak, "oauth", {"step": "fetch-retry-no-cf"}, "err")
-        resp = StealthyFetcher.fetch(auth_url, **kwargs)
+        if "cloudflare" in str(e).lower():
+            kwargs.pop("solve_cloudflare", None)
+            db.append_log(sk, ak, "oauth", {"step": "fetch-retry-no-cf"}, "err")
+            try:
+                resp = StealthyFetcher.fetch(auth_url, **kwargs)
+            except Exception as e2:
+                return AuthResult("failed", f"浏览器流程失败: {str(e2)[:150]}",
+                                  manual_url=auth_url)
+        else:
+            # 浏览器缺失/启动失败等非 CF 异常也要收敛为 failed:
+            # 外抛会让 /api/checkin、/api/reauth 直接 HTTP 500(实测:
+            # playwright 内核缺失时每天凌晨定时签到 4/4 全 500)
+            db.append_log(sk, ak, "oauth",
+                          {"step": "fetch-error", "error": str(e)[:150]}, "err")
+            return AuthResult("failed", f"浏览器流程失败: {str(e)[:150]}",
+                              manual_url=auth_url)
 
     # 3b. capture_xhr 保险:回调页前端自己 GET /api/oauth/{provider}?code&state,
     #     响应里就有凭据——URL 链漏抓时直接从这里拿。
@@ -576,15 +587,25 @@ def authorize(site: dict, account: dict, cfg: dict,
             # (实测 JustDoWork:djt889 因旧 token 探测失败,同站无旧 token 的账号却成功)
             probe = SiteClient(site, {**account, "siteCookie": holder["site_cookies"],
                                       "token": ""}, cfg)
-            sr = probe.call("get", "/api/user/self")
-            if sr.status == 200 and isinstance(sr.data, dict):
-                d = sr.data.get("data") or {}
-                creds.update({
-                    "github_login": d.get("username") or want_login,
-                    "github_id": str(d.get("github_user_id") or d.get("github_id") or ""),
-                    "site_user_id": str(d.get("id") or ""),
-                })
-                probe_ok = True
+            # 落地后立刻请求易被 WAF 拦(假 200/非 JSON,实测 AgentRouter aliyun WAF),
+            # 重试 3 次再放弃;失败响应细节记日志,便于下次直接定位
+            for attempt in range(3):
+                sr = probe.call("get", "/api/user/self")
+                if sr.status == 200 and isinstance(sr.data, dict):
+                    d = sr.data.get("data") or {}
+                    creds.update({
+                        "github_login": d.get("username") or want_login,
+                        "github_id": str(d.get("github_user_id") or d.get("github_id") or ""),
+                        "site_user_id": str(d.get("id") or ""),
+                    })
+                    probe_ok = True
+                    break
+                db.append_log(sk, ak, "oauth", {"step": "probe-retry",
+                                                "attempt": attempt + 1,
+                                                "http": sr.status,
+                                                "waf": sr.blocked_by_waf,
+                                                "dataIsDict": isinstance(sr.data, dict)})
+                time.sleep(2)
         except Exception:
             pass
         # 关键:必须探测通过才认成功。浏览器上下文里常只有 WAF 的 acw_tc
