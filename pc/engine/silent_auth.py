@@ -112,6 +112,55 @@ def _authorize_kwargs(task_id: str, on_state) -> dict:
     return kw
 
 
+def _try_refresh(site: dict, account: dict, cfg: dict) -> AuthResult | None:
+    """token 过期但站点 session(cookie)仍有效 ⇒ 用 cookie 调 refresh 端点换新。
+
+    成功返回 ok 的 AuthResult(不新建站点会话);失败/无 cookie 返回 None,
+    调用方继续走 OAuth。refresh 端点是 new-api 系标准接口,其他站 404 时
+    自然回退,无害。
+    注意:new_api_refresh 是**旋转式**刷新令牌——每次 refresh 后旧令牌作废、
+    新令牌在响应 Set-Cookie 下发,必须合并保存,否则下次 refresh 必失败
+    (实测踩坑:消耗旧令牌未保存新 cookie,导致回退 OAuth 又新建会话)。
+    """
+    from ..service.secret_store import open_ as _open
+    cookie = _open(account.get("siteCookie"))
+    if not cookie:
+        return None
+    try:
+        # 清掉过期 token 再发:站点可能优先校验失效 Bearer 而拒绝
+        probe = SiteClient(site, {**account, "siteCookie": cookie, "token": ""}, cfg)
+        r = probe.call("post", "/api/user/auth/refresh")
+        if r.status == 200 and isinstance(r.data, dict):
+            d = r.data.get("data") or {}
+            tok = str(d.get("access_token") or "")
+            if tok:
+                return AuthResult("ok", "refresh 换新(未新建站点会话)",
+                                  token=tok,
+                                  site_cookie=_merge_cookies(cookie, getattr(r, "set_cookies", None)),
+                                  site_user_id=str(account.get("siteUserId") or ""))
+    except Exception:
+        pass
+    return None
+
+
+def _merge_cookies(existing: str, set_cookie_lines: list[str] | None) -> str:
+    """把 refresh 响应的 Set-Cookie 合并进现有 cookie 串(旋转令牌必须接住)。"""
+    if not set_cookie_lines:
+        return existing
+    jar: dict[str, str] = {}
+    for pair in existing.split(";"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            jar[k.strip()] = v.strip()
+    for line in set_cookie_lines or []:
+        first = (line or "").split(";")[0]
+        if "=" in first:
+            k, v = first.split("=", 1)
+            if v and v.lower() != "deleted":
+                jar[k.strip()] = v.strip()
+    return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+
 def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = None,
              force: bool = False, headful: bool = False,
              task_id: str = "", on_state=None) -> AuthResult:
@@ -133,6 +182,19 @@ def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = Non
                     return AuthResult("ok", "冷却复用(8s 内刚换过)")   # 复用:不重复交换
                 if _fail_until.get(ak, 0) > now:
                     return AuthResult("failed", "失败冷却中(90s),稍后自动重试或手动授权")
+            # 会话分层第 2 层:token 过期但站点 session(cookie)仍活着 ⇒
+            # 用 cookie 调 refresh 端点换新 token,不新建站点会话。
+            # (每走一次 OAuth 站点就多占一个并发会话名额,累积到上限即
+            # AUTH_SESSION_LIMIT,实测 JustDoWork;refresh 实测可换到新 token)
+            rr = _try_refresh(site, account, cfg)
+            if rr is not None:
+                _persist(site, account, rr)
+                db.append_log(sk, ak, "silent-auth",
+                              {"via": "cookie-refresh", "hasToken": bool(rr.token)})
+                with _meta_lock:
+                    _last_ok[ak] = time.time() * 1000
+                    _fail_until.pop(ak, None)
+                return rr
 
         r = authorize(site, account, cfg, credential, headful=headful,
                       **_authorize_kwargs(task_id, on_state))
