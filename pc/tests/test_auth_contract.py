@@ -249,7 +249,7 @@ def test_oauth_status_http_end_to_end(monkeypatch, tmp_path, client):
     seen = {}
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         if callable(on_state):
             on_state({"state": "waiting_code", "hint": "请输入 6 位验证码"})
             seen["mid"] = dict(main._oauth_tasks.get(task_id) or {})
@@ -394,7 +394,7 @@ def _patch_authorize_capture(monkeypatch):
     seen = {}
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         seen["headful"] = headful
         seen["credential"] = credential
         return _res("ok", "授权成功", github_login="u1")
@@ -491,7 +491,7 @@ def test_silent_auth_forwards_task_and_on_state():
         got = {}
 
         def fake_authorize(site, account, cfg, credential=None, headful=False,
-                           task_id="", on_state=None):
+                           task_id="", on_state=None, force=False):
             got["task_id"], got["on_state"] = task_id, on_state
             return _res("need_code", "要码")
 

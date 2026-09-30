@@ -103,7 +103,7 @@ def test_oauth_start_reuses_active_task_for_same_account(monkeypatch, tmp_path, 
     entered = threading.Event()
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         entered.set()
         release.wait(5)
         return _res("ok", "好")

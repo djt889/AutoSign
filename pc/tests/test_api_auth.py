@@ -130,7 +130,7 @@ def test_oauth_start_writes_waiting_states_in_place(monkeypatch, tmp_path, clien
     seen: dict = {}
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         assert callable(on_state) and task_id
         on_state({"state": "waiting_code", "hint": "请输入 6 位验证码"})
         seen["mid"] = dict(main._oauth_tasks.get(task_id) or {})
@@ -263,7 +263,7 @@ def _patch_authorize_capture(monkeypatch, store_key: str = "seen"):
     seen: dict = {}
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         seen["headful"] = headful
         seen["credential"] = credential
         seen["site"] = site
@@ -352,7 +352,7 @@ def test_verify_need_code_maps_waiting_not_failed(monkeypatch, tmp_path, client)
     _, cid = _seed_config(config, with_credential=True)
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         return _res("need_code", "需要验证码", hint="请输入 6 位验证码")
 
     monkeypatch.setattr(main, "authorize", fake_authorize)
@@ -461,7 +461,7 @@ def test_silent_auth_forwards_task_and_state(monkeypatch, tmp_path):
     got: dict = {}
 
     def fake_authorize(site, account, cfg, credential=None, headful=False,
-                       task_id="", on_state=None):
+                       task_id="", on_state=None, force=False):
         got["task_id"], got["on_state"] = task_id, on_state
         return _res("need_code", "要码")
 

@@ -197,7 +197,7 @@ def exchange(site: dict, account: dict, cfg: dict, credential: dict | None = Non
                 return rr
 
         r = authorize(site, account, cfg, credential, headful=headful,
-                      **_authorize_kwargs(task_id, on_state))
+                      force=force, **_authorize_kwargs(task_id, on_state))
 
         with _meta_lock:
             if r.state == "ok":

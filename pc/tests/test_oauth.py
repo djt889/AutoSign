@@ -78,7 +78,7 @@ def test_reuse_window_8s(monkeypatch, tmp_path):
     site, acc = cfg["sites"][0], cfg["sites"][0]["accounts"][0]
 
     calls = {"n": 0}
-    def fake_authorize(site, account, cfg, credential=None, headful=False):
+    def fake_authorize(site, account, cfg, credential=None, headful=False, task_id="", on_state=None, force=False):
         calls["n"] += 1
         return AuthResult("ok", "ok", token="t-new", site_cookie="sess=1", github_login="u1")
     monkeypatch.setattr(sa, "authorize", fake_authorize)

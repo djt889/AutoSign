@@ -241,7 +241,7 @@ def b1_identity_check(creds: dict, account: dict, trusted: bool = False) -> tupl
 
 def authorize(site: dict, account: dict, cfg: dict,
               credential: dict | None = None, headful: bool = False,
-              task_id: str = "", on_state=None) -> AuthResult:
+              task_id: str = "", on_state=None, force: bool = False) -> AuthResult:
     """OAuth 全流程。headful=False(默认,方式 A)headless 全自动;
     headful=True(方式 B 兜底)弹可见浏览器,用户现场登录一次,
     GitHub 会话存 user_data_dir,之后恢复全自动。
@@ -250,6 +250,9 @@ def authorize(site: dict, account: dict, cfg: dict,
     on_state: 需要用户介入时调用(可多次,同一状态只报一次);流程继续等待注入码,
               不返回;超时后才返回。dict 形如 {"state":"waiting_code","hint":...}
               或 {"state":"waiting_manual","manualUrl":...}。
+    force:    True=跳过会话复用,必须真正重放一次登录。login 型站点靠
+              「新登录」触发当日发奖,复用会让重登变成 no-op、站点永远
+              不发新奖励(实测 1.0.3 起每日定时签到全 failed 的根因)。
     """
     from scrapling.fetchers import StealthyFetcher
 
@@ -265,7 +268,7 @@ def authorize(site: dict, account: dict, cfg: dict,
     #    站点普遍限制单账号并发会话数(如 new-api 的 AUTH_SESSION_LIMIT),
     #    每次都无脑走一遍 OAuth 会不断累加会话,最终把账号顶到上限而无法再授权。
     #    只有确认失效(401/403)才继续走下面的新建流程。
-    if not headful:
+    if not headful and not force:
         try:
             probe = client.call("get", "/api/user/self")
             if probe.status == 200 and isinstance(probe.data, dict):
@@ -298,7 +301,11 @@ def authorize(site: dict, account: dict, cfg: dict,
     auth_url = ("https://github.com/login/oauth/authorize"
                 f"?client_id={quote(client_id)}&state={quote(flow_token)}"
                 f"&scope=user:email"
-                + (f"&login={quote(want_login)}" if want_login else ""))
+                + (f"&login={quote(want_login)}" if want_login else "")
+                # force(每日重登/手动重授权)强制弹授权确认页:GitHub 对已授权
+                # 应用有时直接 302 跳过确认,而 AgentRouter 类站点的每日奖励
+                # 挂在「点击 Authorize」上——跳过即不发奖(实测随机失败根因)
+                + ("&prompt=consent" if force else ""))
     db.append_log(sk, ak, "oauth", {"step": "authorize", "cid": client_id[:8] + "***",
                                     "loginParam": bool(want_login), "state": flow_token[:6] + "***"})
 
@@ -362,6 +369,27 @@ def authorize(site: dict, account: dict, cfg: dict,
                 holder["final_url"] = cur
                 if cur not in holder["chain"]:
                     holder["chain"].append(cur)
+        except Exception:
+            pass
+
+        # force(login 型每日重登/手动重授权)要求"真登录一次":GitHub 会话
+        # 有效时会一步直达站点回调,跳过 GitHub 的登录+Authorize 确认——
+        # 实测 AgentRouter 只在真正重新授权时才发每日奖励/更新 last_login_time,
+        # 一步直达 = 每日定时签到永远拿不到奖。检测到一步直达 ⇒ 清 GitHub
+        # 会话重走完整登录链(账密/TOTP 自动填充均具备)。
+        try:
+            _u = page.url or ""
+            _hit = force and credential and urlparse(_u).hostname == site_host
+            db.append_log(sk, ak, "oauth", {"step": "force-probe",
+                                            "force": bool(force),
+                                            "hasCred": bool(credential),
+                                            "url": _u[:70],
+                                            "siteHost": site_host})
+            if _hit:
+                db.append_log(sk, ak, "oauth", {"step": "force-relogin-clear-session"})
+                page.context.clear_cookies()
+                page.goto(auth_url, wait_until="domcontentloaded")
+                holder["chain"].append(page.url)
         except Exception:
             pass
 
